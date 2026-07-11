@@ -46,9 +46,40 @@ in `.codex/hooks.json`. A command entry is:
 }
 ```
 
-OpenCode needs a `tool.execute.before` adapter that maps its tool name and arguments
-to `tool_name` and `tool_input`, sends the JSON to each Python process, rejects exit
-`2` with stderr, and allows exit `0`.
+OpenCode has no JSON hook config, so this repo ships a ready-to-use plugin,
+`opencode-guard.ts`, that does the `tool.execute.before` bridging for you (it maps
+OpenCode's tool name and arguments to `tool_name`/`tool_input`, sends the JSON to
+each Python guard, rejects exit `2` with stderr, allows exit `0`, and logs a paired
+tool call + result transcript so the guessed-proof escape hatch keeps working).
+
+To install it in a project:
+
+1. Copy the guards beside `isabelle_hook_common.py` into `.opencode/hooks/`
+   (`no_apply_scripts.py`, `no_guessed_proofs.py`, `isabelle_hook_common.py`,
+   `Hook_Searchable_Methods.thy`).
+2. Copy `guards.json` into `.opencode/hooks/` too, and edit its hook list/args to
+   taste.
+3. Copy `opencode-guard.ts` into `.opencode/plugins/`.
+
+`guards.json` configures the plugin (read once at load from the hooks directory):
+
+```json
+{
+  "interpreter": "python3",
+  "hooks": [
+    { "script": "no_guessed_proofs.py", "matcher": "Write|Edit|MultiEdit|Bash",
+      "args": ["--window", "30", "--found-via", "sledgehammer", "try0"] },
+    { "script": "no_apply_scripts.py", "matcher": "Write|Edit|MultiEdit|Bash" }
+  ]
+}
+```
+
+- `interpreter` is optional; it defaults to `$ISABELLE_HOOKS_PYTHON`, then `python3`
+  on `PATH`. Point it at a specific interpreter when the guards need pinned deps.
+- Each `matcher` is a JavaScript regex tested against both OpenCode's tool id
+  (`bash`, `edit`, …) and its mapped Claude name (`Bash`, `Edit`, …).
+- A missing or invalid `guards.json` fails open (no guards run) rather than blocking
+  every tool call.
 
 ## Matcher contract
 

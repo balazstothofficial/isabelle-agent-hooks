@@ -17,6 +17,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.x"
+      - uses: oven-sh/setup-bun@v2
       - name: Install Ruff
         run: python -m pip install ruff
       - name: Lint
@@ -26,3 +27,5 @@ jobs:
           python isabelle_hook_common.test.py
           python no_guessed_proofs.test.py
           python no_apply_scripts.test.py
+      - name: Test OpenCode plugin
+        run: bun test opencode-guard.test.ts
