@@ -411,6 +411,51 @@ class NoGuessedProofs(unittest.TestCase):
         finally:
             os.remove(path)
 
+    def test_current_in_flight_edit_does_not_invalidate_search(self):
+        edit_calls = (
+            ("Write", {"file_path": "Foo.thy", "content": "lemma x by auto"}),
+            ("Edit", {"file_path": "Foo.thy", "new_string": "by auto"}),
+            ("MultiEdit", {"file_path": "Foo.thy", "edits": [
+                {"new_string": "lemma x by auto"},
+            ]}),
+            ("apply_patch", {"patch": (
+                "*** Begin Patch\n*** Add File: Foo.thy\n+lemma x by auto\n*** End Patch\n"
+            )}),
+            ("Bash", {"command": "printf 'lemma x by auto' > Foo.thy"}),
+            ("mcp__iq-dev__write_file", {"path": "Foo.thy", "content": "by auto"}),
+            ("mcp__iq-dev__save_file", {"path": "Foo.thy", "content": "by auto"}),
+            ("mcp__isabelle-pide-mcp__edit", {"origin": "Foo.thy", "text": "by auto"}),
+        )
+        for index, (name, inp) in enumerate(edit_calls):
+            with self.subTest(tool=name):
+                path = transcript_blocks(
+                    use("repl_step", {"isar_text": "try0"}, call_id="search"),
+                    result("Found proof: by auto", call_id="search"),
+                    use(name, inp, call_id="current-%d" % index),
+                )
+                try:
+                    payload = {"tool_name": name, "tool_input": inp}
+                    payload["transcript_path"] = path
+                    code, err = run_hook(payload, ["--searchable", "auto"])
+                    self.assertEqual(code, 0, (name, err))
+                finally:
+                    os.remove(path)
+
+    def test_current_edit_does_not_consume_minimal_window(self):
+        path = transcript_blocks(
+            use("repl_step", {"isar_text": "try0"}, call_id="search"),
+            result("Found proof: by auto", call_id="search"),
+            use("Write", {"file_path": "Foo.thy", "content": "lemma x by auto"},
+                call_id="current"),
+        )
+        try:
+            payload = thy_write("lemma x by auto")
+            payload["transcript_path"] = path
+            code, err = run_hook(payload, ["--window", "1", "--searchable", "auto"])
+            self.assertEqual(code, 0, err)
+        finally:
+            os.remove(path)
+
     def test_found_method_is_consumed_by_first_write(self):
         path = transcript_blocks(
             use("repl_sledgehammer", call_id="search"),
@@ -418,6 +463,42 @@ class NoGuessedProofs(unittest.TestCase):
             use("Write", {"file_path": "First.thy", "content": "lemma a by auto"},
                 call_id="write"),
             result("written", call_id="write"),
+        )
+        try:
+            payload = thy_write("lemma b by auto")
+            payload["transcript_path"] = path
+            code, err = run_hook(payload, ["--searchable", "auto"])
+            self.assertEqual(code, 2)
+            self.assertIn("method `auto`", err)
+        finally:
+            os.remove(path)
+
+    def test_completed_write_still_invalidates_before_current_write(self):
+        path = transcript_blocks(
+            use("repl_sledgehammer", call_id="search"),
+            result("Try this: by auto", call_id="search"),
+            use("Write", {"file_path": "First.thy", "content": "lemma a by auto"},
+                call_id="first-write"),
+            result("written", call_id="first-write"),
+            use("Write", {"file_path": "Second.thy", "content": "lemma b by auto"},
+                call_id="current-write"),
+        )
+        try:
+            payload = thy_write("lemma b by auto")
+            payload["transcript_path"] = path
+            code, err = run_hook(payload, ["--searchable", "auto"])
+            self.assertEqual(code, 2)
+            self.assertIn("method `auto`", err)
+        finally:
+            os.remove(path)
+
+    def test_completed_save_file_invalidates_search(self):
+        path = transcript_blocks(
+            use("repl_sledgehammer", call_id="search"),
+            result("Try this: by auto", call_id="search"),
+            use("mcp__iq-dev__save_file", {"path": "First.thy", "content": "by auto"},
+                call_id="save"),
+            result("saved", call_id="save"),
         )
         try:
             payload = thy_write("lemma b by auto")
@@ -454,6 +535,21 @@ class NoGuessedProofs(unittest.TestCase):
             payload["transcript_path"] = path
             code, _ = run_hook(payload, ["--searchable", "auto"])
             self.assertEqual(code, 2)
+        finally:
+            os.remove(path)
+
+    def test_in_flight_proof_step_is_not_mistaken_for_current_edit(self):
+        path = transcript_blocks(
+            use("repl_sledgehammer", call_id="search"),
+            result("Try this: by auto", call_id="search"),
+            use("repl_step", {"isar_text": "next"}, call_id="step"),
+        )
+        try:
+            payload = thy_write("lemma b by auto")
+            payload["transcript_path"] = path
+            code, err = run_hook(payload, ["--searchable", "auto"])
+            self.assertEqual(code, 2)
+            self.assertIn("method `auto`", err)
         finally:
             os.remove(path)
 

@@ -502,10 +502,18 @@ def _is_hammer(name, cmd, triggers, trigger_rxs):
     return any(t in name for t in triggers) or any(rx.search(cmd) for rx in trigger_rxs)
 
 
-_EVIDENCE_INVALIDATING_NAMES = (
-    "write", "edit", "apply_patch", "multiedit",
+_EDIT_CALL_NAMES = (
+    "write", "edit", "apply_patch", "multiedit", "save_file",
+)
+
+_EVIDENCE_INVALIDATING_NAMES = _EDIT_CALL_NAMES + (
     "repl_step", "repl_undo", "repl_reset", "repl_load",
 )
+
+
+def _is_edit_call(name):
+    """Whether a transcript call can be the edit currently guarded by PreToolUse."""
+    return name == "bash" or any(part in name for part in _EDIT_CALL_NAMES)
 
 
 def _invalidates_search_evidence(name, cmd, is_hammer):
@@ -613,17 +621,31 @@ def recent_method_evidence(path, window, method, triggers):
     an unrelated goal) while the method's name happens to appear in some other,
     unrelated result.
 
-    The result must FOLLOW its trigger call and no later proof/file-state-changing call
-    may intervene. Consequently the first theory write consumes the practical escape
-    hatch (that write appears in the transcript before a later write), and a result from
-    an earlier goal cannot authorize guesses indefinitely. Read-only calls may remain
-    interleaved when call IDs let us pair the hammer with its own result.
+    The result must FOLLOW its trigger call and no later completed proof/file-state-
+    changing call may intervene. Some harnesses append the edit currently undergoing
+    PreToolUse before invoking this hook; when that in-flight edit is the final event
+    and has no result yet, it is omitted so it cannot invalidate itself or consume a
+    recency-window slot. Harnesses that invoke the hook before appending the edit need
+    no special handling. A completed first theory write remains in the transcript and
+    consumes the escape hatch before a later write, so evidence from an earlier goal
+    cannot authorize guesses indefinitely. Read-only calls may remain interleaved when
+    call IDs let us pair the hammer with its own result.
 
     The window is the last `window` tool CALLS plus every event after the earliest of
     them. Missing/unparseable transcripts and non-matching results yield None."""
     if not path or not os.path.exists(path):
         return None
     events = _read_events(path, max(window * _TAIL_LINES_PER_CALL, _TAIL_MIN_LINES))
+    if not events:
+        return None
+    # Claude Code versions differ on whether the guarded tool_use is persisted before
+    # or after PreToolUse runs. In the former ordering, the current edit is the final
+    # call and cannot yet have a result. Drop only that in-flight edit. Earlier edits
+    # (including a completed edit immediately before it) and proof-state calls remain
+    # evidence-invalidating. Do this before slicing the call window so a small window
+    # still measures calls preceding the edit rather than counting the edit itself.
+    if events[-1].kind == "call" and _is_edit_call(events[-1].name):
+        events = events[:-1]
     if not events:
         return None
     call_positions = [i for i, e in enumerate(events) if e.kind == "call"]
