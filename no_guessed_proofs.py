@@ -478,8 +478,8 @@ def main():
 # {"message":{"content":[...]}}). The Codex/OpenCode function-call variants below are a
 # BEST-EFFORT guess: if they are wrong for a given agent, the escape hatch silently
 # never fires there and a legitimately *found* method is over-blocked (fail-safe, but
-# annoying). See transcript-schema.md in this directory for how to verify these against
-# a real Codex/OpenCode transcript and update them.
+# annoying). Update these constants and their payload tests when verified schemas
+# change.
 _USE_TYPES = ("tool_use", "function_call", "tool_call")
 _RESULT_TYPES = ("tool_result", "function_call_output", "tool_output", "function_output")
 
