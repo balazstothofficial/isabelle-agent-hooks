@@ -8,9 +8,9 @@ allowed (unlike a guessed `by`, an apply-script is not made acceptable by a
 preceding sledgehammer/try0).
 
 Blocks a write to an Isabelle theory when the ADDED text contains an apply-script
-(`apply ...`). Covers Write / Edit / MultiEdit / Bash, Codex's apply_patch, the
-iq-dev MCP write_file/save_file, and the isabelle-pide-mcp `edit` tool. Non-theory
-writes are never blocked. Fails OPEN on internal errors.
+(`apply ...`). Covers Write / Edit / MultiEdit / Bash, Codex's apply_patch and
+functions.exec, the iq-dev MCP write_file/save_file, and the isabelle-pide-mcp
+`edit` tool. Non-theory writes are never blocked. Fails OPEN on internal errors.
 """
 import sys, re
 try:

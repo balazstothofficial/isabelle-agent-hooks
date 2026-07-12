@@ -376,6 +376,40 @@ class ToolCoverage(unittest.TestCase):
         })
         self.assertIn("by metis", check)
 
+    def test_codex_functions_exec_unwraps_mcp_write_file(self):
+        check, transcript = run({
+            "tool_name": "functions.exec",
+            "tool_input": (
+                'const r = await tools.mcp__iq_dev__write_file({'
+                'path:"Foo.thy",command:"str_replace",old_str:"by simp",'
+                'new_str:"apply (rule TrueI) done"}); text(r);'
+            ),
+            "transcript_path": "/tmp/codex.jsonl",
+        })
+        self.assertIn("apply (rule TrueI) done", check)
+        self.assertNotIn("by simp", check)
+        self.assertEqual(transcript, "/tmp/codex.jsonl")
+
+    def test_codex_functions_exec_dict_envelope(self):
+        check, _ = run({
+            "tool_name": "functions.exec",
+            "tool_input": {"code": (
+                'await tools.mcp__iq_dev__write_file({'
+                'path:"Foo.thy",command:"insert",new_str:"apply auto"});'
+            )},
+        })
+        self.assertIn("apply auto", check)
+
+    def test_codex_functions_exec_ignores_tool_text_in_a_string(self):
+        check, _ = run({
+            "tool_name": "functions.exec",
+            "tool_input": (
+                'text("tools.mcp__iq_dev__write_file({'
+                'path:\\"Foo.thy\\",new_str:\\"apply auto\\"})");'
+            ),
+        })
+        self.assertIsNone(check)
+
     def test_pide_mcp_edit_origin(self):
         check, _ = run({
             "tool_name": "mcp__isabelle-pide-mcp__edit",

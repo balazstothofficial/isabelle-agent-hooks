@@ -19,9 +19,9 @@ Config (all from argv, so policy stays with the caller):
   --isabelle-command CMD  pinned Isabelle launcher used for discovery
   --searchable M1 ...     explicit registry override (tests/manual diagnostics)
 
-Covers Write / Edit / MultiEdit / Bash, Codex's apply_patch, the iq-dev MCP
-write_file/save_file, and the isabelle-pide-mcp `edit` tool. Non-theory writes are
-never blocked.
+Covers Write / Edit / MultiEdit / Bash, Codex's apply_patch and functions.exec,
+the iq-dev MCP write_file/save_file, and the isabelle-pide-mcp `edit` tool.
+Non-theory writes are never blocked.
 Fails OPEN on internal errors so it can never brick the workflow.
 """
 import sys, json, re, os, hashlib, subprocess, tempfile, time
@@ -31,7 +31,11 @@ try:
 except ImportError:  # non-POSIX manual use: cache remains atomic, just not locked
     fcntl = None
 try:
-    from isabelle_hook_common import extract_thy_edits
+    from isabelle_hook_common import (
+        EXEC_TOOL_NAMES,
+        extract_thy_edits,
+        orchestrated_tool_calls,
+    )
 except Exception as _e:
     # Fail OPEN, but say so: a missing/broken helper silently disables the guard,
     # which otherwise looks identical to "nothing to block". The note is non-blocking
@@ -543,6 +547,46 @@ def _result_text(v):
     return ""
 
 
+def _exec_source(raw):
+    """Extract a functions.exec program from transcript arguments."""
+    if isinstance(raw, dict):
+        for key in ("code", "source", "text"):
+            if isinstance(raw.get(key), str):
+                return raw[key]
+        return None
+    if not isinstance(raw, str):
+        return None
+    try:
+        decoded = json.loads(raw)
+    except Exception:
+        return raw
+    return _exec_source(decoded) if isinstance(decoded, dict) else raw
+
+
+def _call_events(name, raw, call_id):
+    """Normalize one transcript call, including nested functions.exec tools."""
+    if name in tuple(n.lower() for n in EXEC_TOOL_NAMES):
+        source = _exec_source(raw)
+        nested = orchestrated_tool_calls(source) if source else []
+        if nested:
+            return [
+                TranscriptEvent(
+                    "call",
+                    call_id,
+                    nested_name.lower(),
+                    " ".join(str(fields.get(k, "")) for k in _CMD_KEYS).lower(),
+                )
+                for nested_name, _argument, fields in nested
+            ]
+    if isinstance(raw, dict):
+        cmd = " ".join(str(raw.get(k, "")) for k in _CMD_KEYS).lower()
+    elif isinstance(raw, str):
+        cmd = raw.lower()
+    else:
+        cmd = ""
+    return [TranscriptEvent("call", call_id, name, cmd)]
+
+
 def _iter_blocks(obj):
     """Yield content-block dicts from the transcript shapes we support: Claude's
     {"message":{"content":[...]}}, a bare {"content":[...]}, and a line that is itself
@@ -590,14 +634,8 @@ def _read_events(path, max_lines):
             if t in _USE_TYPES:
                 name = (b.get("name") or "").lower()
                 raw = b.get("input") or b.get("arguments") or {}
-                if isinstance(raw, dict):
-                    cmd = " ".join(str(raw.get(k, "")) for k in _CMD_KEYS).lower()
-                elif isinstance(raw, str):
-                    cmd = raw.lower()
-                else:
-                    cmd = ""
                 call_id = b.get("id") or b.get("call_id") or b.get("tool_call_id")
-                events.append(TranscriptEvent("call", call_id, name, cmd))
+                events.extend(_call_events(name, raw, call_id))
             elif t in _RESULT_TYPES:
                 body = b.get("content", b.get("output", b.get("text", "")))
                 call_id = b.get("tool_use_id") or b.get("call_id") or b.get("tool_call_id")

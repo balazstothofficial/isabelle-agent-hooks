@@ -122,6 +122,64 @@ class NoApplyScripts(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("apply", err)
 
+    def test_codex_functions_exec_write_file_blocks(self):
+        payload = {
+            "tool_name": "functions.exec",
+            "tool_input": (
+                'const r = await tools.mcp__iq_dev__write_file({'
+                'path:"Foo.thy",command:"str_replace",old_str:"by simp",'
+                'new_str:"apply (rule TrueI) done"}); text(r);'
+            ),
+        }
+        code, err = run_hook(payload)
+        self.assertEqual(code, 2)
+        self.assertIn("apply", err)
+
+    def test_codex_functions_exec_control_allowed(self):
+        payload = {
+            "tool_name": "functions.exec",
+            "tool_input": (
+                'const r = await tools.mcp__iq_dev__write_file({'
+                'path:"Foo.thy",command:"str_replace",old_str:"by (rule TrueI)",'
+                'new_str:"by simp"}); text(r);'
+            ),
+        }
+        code, err = run_hook(payload)
+        self.assertEqual(code, 0, err)
+
+    def test_codex_functions_exec_can_remove_existing_apply(self):
+        payload = {
+            "tool_name": "functions.exec",
+            "tool_input": (
+                'await tools.mcp__iq_dev__write_file({'
+                'path:"Foo.thy",command:"str_replace",old_str:"apply auto done",'
+                'new_str:"by simp"});'
+            ),
+        }
+        code, err = run_hook(payload)
+        self.assertEqual(code, 0, err)
+
+    def test_direct_codex_and_claude_paths_still_block(self):
+        payloads = [
+            {
+                "tool_name": "mcp__iq_dev__write_file",
+                "tool_input": {
+                    "path": "Foo.thy", "command": "str_replace",
+                    "old_str": "by simp", "new_str": "apply auto",
+                },
+            },
+            {
+                "tool_name": "Edit",
+                "tool_input": {
+                    "file_path": "Foo.thy", "old_string": "by simp",
+                    "new_string": "apply auto",
+                },
+            },
+        ]
+        for payload in payloads:
+            code, err = run_hook(payload)
+            self.assertEqual(code, 2, (payload["tool_name"], err))
+
 
 if __name__ == "__main__":
     unittest.main()

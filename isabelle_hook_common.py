@@ -24,11 +24,13 @@ rather than letting an edit slip through unchecked.
 
 Covers Write / Edit / MultiEdit / Bash, Codex's apply_patch (a unified-diff style
 envelope -- including an apply_patch heredoc inside a Bash command), the iq-dev MCP
-write_file/save_file, and the isabelle-pide-mcp `edit` tool -- the latter checked
-when its `origin` is a *.thy path (a session-qualified theory name such as HOL.Nat
-is not a *.thy path, so it is not recognised).
+write_file/save_file, and the isabelle-pide-mcp `edit` tool. Codex functions.exec
+programs are unwrapped into those same direct events when their nested tool arguments
+are literal. The PIDE edit is checked when its `origin` is a *.thy path (a
+session-qualified theory name such as HOL.Nat is not a *.thy path, so it is not
+recognised).
 """
-import sys, json, re, difflib
+import sys, json, re, difflib, ast
 from collections import namedtuple
 
 
@@ -70,6 +72,178 @@ OLD_KEYS = ("old_string", "old_str", "old_text")
 BASH_TOOL = "Bash"
 PATCH_TOOL_SUBSTR = "apply_patch"      # Codex's edit tool
 MCP_WRITE_SUBSTRS = ("write_file", "save_file")  # iq-dev MCP write verbs
+EXEC_TOOL_NAMES = ("functions.exec", "functions_exec")
+
+
+def _js_string_at(source, start):
+    """Decode one quoted JavaScript string literal at ``start``.
+
+    Codex's functions.exec generator emits ordinary single- or double-quoted
+    literals for nested tool arguments.  Keep this deliberately small: template
+    literals and computed values are not treated as inspectable writes.
+    """
+    if start >= len(source) or source[start] not in ("'", '"'):
+        return None, start
+    quote, i = source[start], start + 1
+    while i < len(source):
+        if source[i] == "\\":
+            i += 2
+            continue
+        if source[i] == quote:
+            token = source[start:i + 1]
+            try:
+                return ast.literal_eval(token), i + 1
+            except Exception:
+                return None, i + 1
+        i += 1
+    return None, len(source)
+
+
+def _js_call_end(source, start):
+    """Return the matching ``)`` for a call whose opening paren is at ``start``."""
+    stack, quote, i = [")"], None, start + 1
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    while i < len(source):
+        c = source[i]
+        if quote:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if source.startswith("//", i):
+            j = source.find("\n", i + 2)
+            i = len(source) if j < 0 else j + 1
+            continue
+        if source.startswith("/*", i):
+            j = source.find("*/", i + 2)
+            i = len(source) if j < 0 else j + 2
+            continue
+        if c in ("'", '"', "`"):
+            quote, i = c, i + 1
+            continue
+        if c in pairs:
+            stack.append(pairs[c])
+        elif c in ")]}":
+            if not stack or c != stack[-1]:
+                return None
+            stack.pop()
+            if not stack:
+                return i
+        i += 1
+    return None
+
+
+def _js_tool_calls(source):
+    """Yield literal ``tools.NAME(ARG)`` calls from a functions.exec program."""
+    out, i, n = [], 0, len(source)
+    while i < n:
+        if source.startswith("//", i):
+            j = source.find("\n", i + 2)
+            i = n if j < 0 else j + 1
+            continue
+        if source.startswith("/*", i):
+            j = source.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if source[i] in ("'", '"'):
+            _, i = _js_string_at(source, i)
+            continue
+        if source[i] == "`":
+            i += 1
+            while i < n:
+                if source[i] == "\\":
+                    i += 2
+                elif source[i] == "`":
+                    i += 1
+                    break
+                else:
+                    i += 1
+            continue
+        if not source.startswith("tools.", i):
+            i += 1
+            continue
+        name_start = i + len("tools.")
+        m = re.match(r"[A-Za-z_$][\w$]*", source[name_start:])
+        if not m:
+            i = name_start
+            continue
+        name = m.group(0)
+        j = name_start + len(name)
+        while j < len(source) and source[j].isspace():
+            j += 1
+        if j >= len(source) or source[j] != "(":
+            i = j
+            continue
+        end = _js_call_end(source, j)
+        if end is None:
+            return out
+        out.append((name, source[j + 1:end]))
+        i = end + 1
+    return out
+
+
+def _js_object_strings(argument):
+    """Extract literal string fields from a generated JavaScript object argument."""
+    fields = {}
+    key_re = re.compile(r'''(?:^|[,{}])\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z_$][\w$]*))\s*:''')
+    for match in key_re.finditer(argument):
+        key = next(g for g in match.groups() if g is not None)
+        i = match.end()
+        while i < len(argument) and argument[i].isspace():
+            i += 1
+        value, _ = _js_string_at(argument, i)
+        if isinstance(value, str):
+            fields[key] = value
+    return fields
+
+
+def orchestrated_tool_calls(source):
+    """Return literal nested ``tools.NAME(ARG)`` calls in source order.
+
+    Each item is ``(name, raw_argument, literal_string_fields)``. Consumers that
+    need more than mutation extraction can therefore share this conservative parser.
+    """
+    if not isinstance(source, str):
+        return []
+    return [
+        (tool, argument, _js_object_strings(argument))
+        for tool, argument in _js_tool_calls(source)
+    ]
+
+
+def _orchestrated_events(source, transcript):
+    """Normalize inspectable nested mutation calls from Codex functions.exec."""
+    events = []
+    for tool, argument, fields in orchestrated_tool_calls(source):
+        if tool == "exec_command":
+            if "cmd" in fields:
+                events.append({
+                    "tool_name": BASH_TOOL,
+                    "tool_input": {"command": fields["cmd"]},
+                    "transcript_path": transcript,
+                })
+        elif PATCH_TOOL_SUBSTR in tool:
+            i = 0
+            while i < len(argument) and argument[i].isspace():
+                i += 1
+            patch, _ = _js_string_at(argument, i)
+            if isinstance(patch, str):
+                events.append({
+                    "tool_name": tool,
+                    "tool_input": {"patch": patch},
+                    "transcript_path": transcript,
+                })
+        elif any(s in tool for s in MCP_WRITE_SUBSTRS) or "open_file" in tool:
+            if fields:
+                events.append({
+                    "tool_name": tool,
+                    "tool_input": fields,
+                    "transcript_path": transcript,
+                })
+    return events
 
 # apply_patch envelope markers. Codex (and any agent that edits via apply_patch)
 # sends a patch like:
@@ -505,12 +679,31 @@ def extract_thy_edits():
         data = json.loads(raw)
     except Exception:
         return None, ""
+    return _extract_thy_edits_data(data)
+
+
+def _extract_thy_edits_data(data):
     if not isinstance(data, dict):
         return None, ""
 
     tool = data.get("tool_name", "") or ""
     ti = data.get("tool_input", {}) or {}
     transcript = data.get("transcript_path", "") or ""
+    if tool in EXEC_TOOL_NAMES:
+        if isinstance(ti, str):
+            source = ti
+        elif isinstance(ti, dict):
+            source = _first_str(ti, ("code", "source", "text"))
+        else:
+            source = None
+        if not source:
+            return None, transcript
+        fragments = []
+        for event in _orchestrated_events(source, transcript):
+            nested, _ = _extract_thy_edits_data(event)
+            if nested:
+                fragments.extend(nested)
+        return (fragments or None), transcript
     if not isinstance(ti, dict):
         return None, transcript
 

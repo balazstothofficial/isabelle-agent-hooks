@@ -46,6 +46,20 @@ in `.codex/hooks.json`. A command entry is:
 }
 ```
 
+Use this matcher for both guards:
+
+```text
+Write|Edit|MultiEdit|Bash|apply_patch|.*write_file|.*save_file|functions[.]exec
+```
+
+The extra alternative is inert in clients that do not expose `functions.exec`, so
+the same matchers are safe in Claude, direct-tool Codex, and OpenCode. When a Codex
+version wraps a write in `functions.exec`, both guards unwrap literal nested
+`write_file`, `apply_patch`, and shell-write calls and check them through the same
+direct parser. The guessed-proof guard also normalizes nested proof-search and write
+calls in the transcript so evidence remains current and single-use. The shipped
+`guards.json` already carries these matchers.
+
 OpenCode has no JSON hook config, so this repo ships a ready-to-use plugin,
 `opencode-guard.ts`, that does the `tool.execute.before` bridging for you (it maps
 OpenCode's tool name and arguments to `tool_name`/`tool_input`, sends the JSON to
@@ -54,9 +68,9 @@ tool call + result transcript so the guessed-proof escape hatch keeps working).
 
 To install it in a project:
 
-1. Copy the guards beside `isabelle_hook_common.py` into `.opencode/hooks/`
-   (`no_apply_scripts.py`, `no_guessed_proofs.py`, `isabelle_hook_common.py`,
-   `Hook_Searchable_Methods.thy`).
+1. Copy these four files into `.opencode/hooks/`: `no_apply_scripts.py`,
+   `no_guessed_proofs.py`, `isabelle_hook_common.py`, and
+   `Hook_Searchable_Methods.thy`.
 2. Copy `guards.json` into `.opencode/hooks/` too, and edit its hook list/args to
    taste.
 3. Copy `opencode-guard.ts` into `.opencode/plugins/`.
@@ -81,16 +95,20 @@ To install it in a project:
 - A missing or invalid `guards.json` fails open (no guards run) rather than blocking
   every tool call.
 
-## Matcher contract
+## Which tools the guards check
 
-The caller's edit-tool matcher must stay synchronized with
-`isabelle_hook_common.py`:
+For each tool call, the guards look inside it to find the file being edited and the
+text being written, then check that text for `apply` scripts and guessed proofs.
 
-- `PATH_KEYS` identifies edited-file fields.
-- `CONTENT_KEYS` identifies added-text fields.
-- `NEW_KEYS` and `OLD_KEYS` describe replacements.
-- `BASH_TOOL`, `PATCH_TOOL_SUBSTR`, and `MCP_WRITE_SUBSTRS` select specialized
-  extraction branches.
+You choose which tools they run on with the `matcher` in your hook config (for
+example `Write|Edit|MultiEdit|Bash`). The guards already understand the standard
+edit tools — `Write`, `Edit`, `MultiEdit`, `Bash`, and common MCP write tools — so
+in most setups this works out of the box and you don't need to do anything.
 
-Every matched tool must expose recognized path/content fields or have a specialized
-branch. Add a representative payload test before extending the matcher.
+One thing to watch: **the guards can only check a tool whose contents they can
+read.** If you point the matcher at an unusual edit tool they don't recognize, they
+won't find any text to inspect and will let the edit through without checking it —
+they never block a call just because they couldn't read it. So only add a tool to
+the matcher if you've confirmed the guards actually catch edits made with it (write
+a proof with an `apply` script through that tool and check that it gets blocked). If
+a tool you rely on isn't being caught, open an issue.

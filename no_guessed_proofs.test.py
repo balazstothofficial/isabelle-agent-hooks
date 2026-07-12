@@ -40,6 +40,22 @@ def thy_write(content):
     return {"tool_name": "Write", "tool_input": {"file_path": "Foo.thy", "content": content}}
 
 
+def exec_call(source, transcript_path=None):
+    payload = {"tool_name": "functions.exec", "tool_input": {"code": source}}
+    if transcript_path is not None:
+        payload["transcript_path"] = transcript_path
+    return payload
+
+
+def exec_write(content):
+    source = (
+        "const r = await tools.mcp__iq_dev__write_file({"
+        'path: "Foo.thy", command: "str_replace", old_str: "by sorry", '
+        "new_str: " + json.dumps(content) + "}); text(r.output);"
+    )
+    return exec_call(source)
+
+
 def transcript_with(*tool_names):
     """A JSONL transcript fixture whose lines each carry one tool_use, in order.
     Returns the path; caller removes it."""
@@ -396,6 +412,91 @@ class NoGuessedProofs(unittest.TestCase):
         code, err = run_hook(payload, ["--searchable", "auto"])
         self.assertEqual(code, 2)
         self.assertIn("method `auto`", err)
+
+    def test_codex_exec_guessed_write_blocks(self):
+        code, err = run_hook(exec_write("by auto"), ["--searchable", "auto"])
+        self.assertEqual(code, 2)
+        self.assertIn("method `auto`", err)
+
+    def test_codex_exec_search_result_authorizes_wrapped_write(self):
+        search = (
+            "const r = await tools.mcp__iq_dev__repl_sledgehammer({}); "
+            "text(r.output);"
+        )
+        path = transcript_blocks(
+            use("functions.exec", {"code": search}, kind="function_call", call_id="search"),
+            result("Try this: by auto", kind="function_call_output", call_id="search"),
+        )
+        try:
+            payload = exec_write("by auto")
+            payload["transcript_path"] = path
+            code, err = run_hook(payload, ["--searchable", "auto"])
+            self.assertEqual(code, 0, err)
+        finally:
+            os.remove(path)
+
+    def test_codex_exec_json_arguments_authorize_wrapped_write(self):
+        search = (
+            "const r = await tools.mcp__iq_dev__repl_sledgehammer({}); "
+            "text(r.output);"
+        )
+        call = {
+            "type": "function_call",
+            "name": "functions.exec",
+            "arguments": json.dumps({"code": search}),
+            "call_id": "search",
+        }
+        path = transcript_blocks(
+            call,
+            result("Try this: by auto", kind="function_call_output", call_id="search"),
+        )
+        try:
+            payload = exec_write("by auto")
+            payload["transcript_path"] = path
+            code, err = run_hook(payload, ["--searchable", "auto"])
+            self.assertEqual(code, 0, err)
+        finally:
+            os.remove(path)
+
+    def test_completed_codex_exec_write_consumes_search_evidence(self):
+        search = (
+            "const r = await tools.mcp__iq_dev__repl_sledgehammer({}); "
+            "text(r.output);"
+        )
+        first_write = exec_write("by auto")["tool_input"]["code"]
+        path = transcript_blocks(
+            use("functions.exec", {"code": search}, kind="function_call", call_id="search"),
+            result("Try this: by auto", kind="function_call_output", call_id="search"),
+            use("functions.exec", {"code": first_write}, kind="function_call", call_id="write-1"),
+            result("completed", kind="function_call_output", call_id="write-1"),
+        )
+        try:
+            payload = exec_write("by auto")
+            payload["transcript_path"] = path
+            code, err = run_hook(payload, ["--searchable", "auto"])
+            self.assertEqual(code, 2)
+            self.assertIn("NOT found", err)
+        finally:
+            os.remove(path)
+
+    def test_in_flight_codex_exec_write_does_not_consume_search_evidence(self):
+        search = (
+            "const r = await tools.mcp__iq_dev__repl_sledgehammer({}); "
+            "text(r.output);"
+        )
+        current_write = exec_write("by auto")["tool_input"]["code"]
+        path = transcript_blocks(
+            use("functions.exec", {"code": search}, kind="function_call", call_id="search"),
+            result("Try this: by auto", kind="function_call_output", call_id="search"),
+            use("functions.exec", {"code": current_write}, kind="function_call", call_id="write"),
+        )
+        try:
+            payload = exec_write("by auto")
+            payload["transcript_path"] = path
+            code, err = run_hook(payload, ["--searchable", "auto"])
+            self.assertEqual(code, 0, err)
+        finally:
+            os.remove(path)
 
     def test_recent_sledgehammer_escape_hatch(self):
         # sledgehammer ran AND its result names the method being written -> found.

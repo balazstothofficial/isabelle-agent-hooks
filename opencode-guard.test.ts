@@ -24,6 +24,20 @@ const SOURCE = join(import.meta.dir, "opencode-guard.ts");
 // A real interpreter to stand in for a packaged python3. Resolved at runtime so this
 // works both locally and in CI (which has python3 on PATH).
 const INTERP = Bun.which("python3") || "python3";
+const REAL_NO_APPLY_HOOKS = [{ matcher: ".*write_file", script: "no_apply_scripts.py", args: [] }];
+const REAL_NO_APPLY_SCRIPTS = {
+  "no_apply_scripts.py": readFileSync(join(import.meta.dir, "no_apply_scripts.py"), "utf8"),
+  "isabelle_hook_common.py": readFileSync(join(import.meta.dir, "isabelle_hook_common.py"), "utf8"),
+};
+
+describe("shipped matcher compatibility", () => {
+  test("both guards accept optional functions.exec orchestration", () => {
+    const config = JSON.parse(readFileSync(join(import.meta.dir, "guards.json"), "utf8"));
+    const byScript = Object.fromEntries(config.hooks.map((hook) => [hook.script, hook.matcher]));
+    expect(byScript["no_apply_scripts.py"]).toContain("functions[.]exec");
+    expect(byScript["no_guessed_proofs.py"]).toContain("functions[.]exec");
+  });
+});
 
 let counter = 0;
 // Lay out a worktree: .opencode/hooks/ (scripts + guards.json) and .opencode/plugins/.
@@ -139,6 +153,38 @@ async function runBefore(hooks, scripts, tool, args, interpreter = INTERP) {
 }
 
 describe("tool.execute.before", () => {
+  test("the real guard blocks a direct OpenCode MCP write_file apply script", async () => {
+    await expect(
+      runBefore(
+        REAL_NO_APPLY_HOOKS,
+        REAL_NO_APPLY_SCRIPTS,
+        "iq-dev_write_file",
+        {
+          path: "Foo.thy",
+          command: "str_replace",
+          old_str: "by simp",
+          new_str: "apply (rule TrueI) done",
+        },
+      ),
+    ).rejects.toThrow(/BLOCKED write to an Isabelle theory/);
+  });
+
+  test("the real guard allows a direct OpenCode MCP write_file control", async () => {
+    await expect(
+      runBefore(
+        REAL_NO_APPLY_HOOKS,
+        REAL_NO_APPLY_SCRIPTS,
+        "iq-dev_write_file",
+        {
+          path: "Foo.thy",
+          command: "str_replace",
+          old_str: "by (rule TrueI)",
+          new_str: "by simp",
+        },
+      ),
+    ).resolves.toBeUndefined();
+  });
+
   test("exit code 2 from a matching hook denies the call with a message", async () => {
     // Assert the message, not just that it threw: this proves the hook actually ran
     // and produced exit 2. No stderr => the fallback "Blocked by guard <script>".
