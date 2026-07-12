@@ -20,7 +20,8 @@ Config (all from argv, so policy stays with the caller):
   --searchable M1 ...     explicit registry override (tests/manual diagnostics)
 
 Covers Write / Edit / MultiEdit / Bash, Codex's apply_patch and functions.exec,
-the iq-dev MCP write_file/save_file, and the isabelle-pide-mcp `edit` tool.
+the I/Q MCP write_file/save_file/open_file creation paths, and the
+isabelle-pide-mcp `edit` tool.
 Non-theory writes are never blocked.
 Fails OPEN on internal errors so it can never brick the workflow.
 """

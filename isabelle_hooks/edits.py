@@ -23,8 +23,9 @@ gate is skipped when no path is present), so that case errs toward over-blocking
 rather than letting an edit slip through unchecked.
 
 Covers Write / Edit / MultiEdit / Bash, Codex's apply_patch (a unified-diff style
-envelope -- including an apply_patch heredoc inside a Bash command), the iq-dev MCP
-write_file/save_file, and the isabelle-pide-mcp `edit` tool. Codex functions.exec
+envelope -- including an apply_patch heredoc inside a Bash command), the I/Q MCP
+write_file/save_file/open_file creation paths, and the isabelle-pide-mcp `edit` tool.
+Codex functions.exec
 programs are unwrapped into those same direct events when their nested tool arguments
 are literal. The PIDE edit is checked when its `origin` is a *.thy path (a
 session-qualified theory name such as HOL.Nat is not a *.thy path, so it is not

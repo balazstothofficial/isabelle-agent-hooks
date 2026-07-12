@@ -33,6 +33,8 @@ USE_EVENT_TYPES = ("tool_use", "function_call", "tool_call")
 RESULT_EVENT_TYPES = (
     "tool_result", "function_call_output", "tool_output", "function_output")
 COMMAND_KEYS = ("command", "method", "tactic", "tac", "proof", "step", "isar_text")
+PROOF_SEARCH_WRAPPER_TOOL_NAMES = ("explore",)
+PROOF_SEARCH_QUERY_KEYS = ("query",)
 
 # Calls which represent an edit, or can move the proof/file state searched earlier.
 EDIT_TOOL_NAMES = (
@@ -81,6 +83,10 @@ def is_mcp_write_tool(name):
 
 def is_open_file_tool(name):
     return _matches_any(name, OPEN_FILE_TOOL_NAMES)
+
+
+def is_proof_search_wrapper_tool(name):
+    return _matches_any(name, PROOF_SEARCH_WRAPPER_TOOL_NAMES)
 
 
 def is_edit_tool_name(name):

@@ -1,5 +1,5 @@
 {
-  "defaultMatcher": "Write|Edit|MultiEdit|Bash|apply_patch|.*write_file|.*save_file|functions[.]exec",
+  "defaultMatcher": "Write|Edit|MultiEdit|Bash|apply_patch|(?:^|[^A-Za-z0-9])edit(?:$|[^A-Za-z0-9])|.*write_file|.*save_file|.*open_file|functions[.]exec",
   "hooks": [
     {
       "script": "no_guessed_proofs.py"

@@ -44,6 +44,10 @@ describe("shipped matcher compatibility", () => {
   test("the shared default accepts optional functions.exec orchestration", () => {
     const config = JSON.parse(readFileSync(join(import.meta.dir, "guards.json"), "utf8"));
     expect(config.defaultMatcher).toContain("functions[.]exec");
+    const matcher = new RegExp(config.defaultMatcher);
+    expect(matcher.test("mcp__isabelle-pide-mcp__edit")).toBe(true);
+    expect(matcher.test("mcp__iq-dev__open_file")).toBe(true);
+    expect(matcher.test("credit_report")).toBe(false);
     expect(config.hooks.every((hook) => hook.matcher === undefined)).toBe(true);
     expect(config.hooks.every((hook) => hook.args === undefined)).toBe(true);
   });

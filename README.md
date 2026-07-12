@@ -9,6 +9,9 @@ PreToolUse guards that enforce two Isabelle proof-discipline rules:
 The guards inspect only text added to `.thy` files. Unsupported or malformed calls
 fail open rather than blocking the agent.
 
+Both AutoCorrode's I/Q MCP server and `isabelle-pide-mcp` are supported, alongside
+the coding agents' standard file read/write/edit tools.
+
 ## Hook contract
 
 Each Python entry point reads one JSON object from standard input:
@@ -87,8 +90,10 @@ Project hooks load only for trusted projects. In the Codex desktop app, open
 do not run.
 
 For Claude Code and Codex, `guards.json` is the canonical matcher reference but is
-not loaded automatically. The matcher covers standard write/edit tools, common MCP
-file writers, `apply_patch`, Bash, and optional `functions.exec` orchestration.
+not loaded automatically. The matcher covers standard write/edit tools, AutoCorrode
+I/Q's `write_file`, `save_file`, and mutating `open_file` calls,
+`isabelle-pide-mcp`'s `edit` tool, `apply_patch`, Bash, and optional `functions.exec`
+orchestration.
 Nested literal writes and proof-search calls inside `functions.exec` are normalized
 through the same parsers as direct calls.
 

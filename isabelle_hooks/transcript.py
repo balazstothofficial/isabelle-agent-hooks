@@ -7,17 +7,22 @@ from collections import deque, namedtuple
 from .javascript import orchestrated_tool_calls
 from .protocol import (
     COMMAND_KEYS,
+    CONTENT_KEYS,
     EXEC_SOURCE_KEYS,
+    PROOF_SEARCH_QUERY_KEYS,
     RESULT_EVENT_TYPES,
     USE_EVENT_TYPES,
     is_edit_tool_name,
     is_evidence_invalidating_tool,
     is_exec_tool,
+    is_open_file_tool,
+    is_proof_search_wrapper_tool,
     tool_name_ends_with,
 )
 
 
-TranscriptEvent = namedtuple("TranscriptEvent", "kind call_id name text")
+TranscriptEvent = namedtuple("TranscriptEvent", "kind call_id name text mutates",
+                             defaults=(False,))
 
 # Transcript content-block schemas. VERIFIED for Claude (tool_use / tool_result, under
 # {"message":{"content":[...]}}). The Codex/OpenCode function-call variants below are a
@@ -42,16 +47,16 @@ def _is_hammer(name, cmd, triggers, trigger_rxs):
         rx.search(cmd) for rx in trigger_rxs)
 
 
-def _is_edit_call(name):
+def _is_edit_call(name, mutates=False):
     """Whether a transcript call can be the edit currently guarded by PreToolUse."""
-    return is_edit_tool_name(name)
+    return mutates or is_edit_tool_name(name)
 
 
-def _invalidates_search_evidence(name, cmd, is_hammer):
+def _invalidates_search_evidence(name, cmd, is_hammer, mutates=False):
     """Whether a tool call can move the proof/file state searched by the hammer."""
     if is_hammer:
         return False
-    return bool(cmd.strip()) or is_evidence_invalidating_tool(name)
+    return bool(cmd.strip()) or mutates or is_evidence_invalidating_tool(name)
 
 
 def _result_text(v):
@@ -90,6 +95,26 @@ def _exec_source(raw):
     return _exec_source(decoded) if isinstance(decoded, dict) else raw
 
 
+def _call_text(name, raw):
+    """Extract only fields that can genuinely invoke a proof command/search."""
+    if not isinstance(raw, dict):
+        return raw.lower() if isinstance(raw, str) else ""
+    keys = COMMAND_KEYS
+    if is_proof_search_wrapper_tool(name):
+        keys += PROOF_SEARCH_QUERY_KEYS
+    return " ".join(str(raw.get(k, "")) for k in keys).lower()
+
+
+def _mutates_open_file(name, raw):
+    """I/Q open_file is read-only unless it creates a file with initial content."""
+    return bool(
+        is_open_file_tool(name)
+        and isinstance(raw, dict)
+        and (raw.get("create_if_missing") is True
+             or any(isinstance(raw.get(k), str) for k in CONTENT_KEYS))
+    )
+
+
 def _call_events(name, raw, call_id):
     """Normalize one transcript call, including nested functions.exec tools."""
     if is_exec_tool(name):
@@ -101,17 +126,13 @@ def _call_events(name, raw, call_id):
                     "call",
                     call_id,
                     nested_name.lower(),
-                    " ".join(str(fields.get(k, "")) for k in COMMAND_KEYS).lower(),
+                    _call_text(nested_name, fields),
+                    _mutates_open_file(nested_name, fields),
                 )
                 for nested_name, _argument, fields in nested
             ]
-    if isinstance(raw, dict):
-        cmd = " ".join(str(raw.get(k, "")) for k in COMMAND_KEYS).lower()
-    elif isinstance(raw, str):
-        cmd = raw.lower()
-    else:
-        cmd = ""
-    return [TranscriptEvent("call", call_id, name, cmd)]
+    return [TranscriptEvent(
+        "call", call_id, name, _call_text(name, raw), _mutates_open_file(name, raw))]
 
 
 def _iter_blocks(obj):
@@ -209,7 +230,8 @@ def recent_method_evidence(path, window, method, triggers):
     # (including a completed edit immediately before it) and proof-state calls remain
     # evidence-invalidating. Do this before slicing the call window so a small window
     # still measures calls preceding the edit rather than counting the edit itself.
-    if events[-1].kind == "call" and _is_edit_call(events[-1].name):
+    if (events[-1].kind == "call"
+            and _is_edit_call(events[-1].name, events[-1].mutates)):
         events = events[:-1]
     if not events:
         return None
@@ -231,7 +253,7 @@ def recent_method_evidence(path, window, method, triggers):
             is_hammer = _is_hammer(e.name, e.text, triggers, trigger_rxs)
             if is_hammer:
                 found = None  # a newer search supersedes an older result
-            elif _invalidates_search_evidence(e.name, e.text, is_hammer):
+            elif _invalidates_search_evidence(e.name, e.text, is_hammer, e.mutates):
                 state_epoch += 1
                 found = None
             if e.call_id:

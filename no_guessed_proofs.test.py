@@ -567,6 +567,21 @@ class NoGuessedProofs(unittest.TestCase):
         finally:
             os.remove(path)
 
+    def test_iq_explore_sledgehammer_is_escape_hatch(self):
+        path = transcript_blocks(
+            use("mcp__iq-dev__explore", {
+                "query": "sledgehammer", "arguments": "provers = cvc5",
+            }, call_id="search"),
+            result("Try this: by (metis foo)", call_id="search"),
+        )
+        try:
+            payload = thy_write("lemma x by metis")
+            payload["transcript_path"] = path
+            code, err = run_hook(payload, ["--window", "20"])
+            self.assertEqual(code, 0, err)
+        finally:
+            os.remove(path)
+
     def test_current_in_flight_edit_does_not_invalidate_search(self):
         edit_calls = (
             ("Write", {"file_path": "Foo.thy", "content": "lemma x by auto"}),
@@ -580,6 +595,9 @@ class NoGuessedProofs(unittest.TestCase):
             ("Bash", {"command": "printf 'lemma x by auto' > Foo.thy"}),
             ("mcp__iq-dev__write_file", {"path": "Foo.thy", "content": "by auto"}),
             ("mcp__iq-dev__save_file", {"path": "Foo.thy", "content": "by auto"}),
+            ("mcp__iq-dev__open_file", {
+                "path": "Foo.thy", "create_if_missing": True, "content": "by auto",
+            }),
             ("mcp__isabelle-pide-mcp__edit", {"origin": "Foo.thy", "text": "by auto"}),
         )
         for index, (name, inp) in enumerate(edit_calls):
@@ -662,6 +680,40 @@ class NoGuessedProofs(unittest.TestCase):
             code, err = run_hook(payload, ["--searchable", "auto"])
             self.assertEqual(code, 2)
             self.assertIn("method `auto`", err)
+        finally:
+            os.remove(path)
+
+    def test_completed_open_file_create_invalidates_search(self):
+        path = transcript_blocks(
+            use("repl_sledgehammer", call_id="search"),
+            result("Try this: by auto", call_id="search"),
+            use("mcp__iq-dev__open_file", {
+                "path": "First.thy", "create_if_missing": True,
+                "content": "lemma a by auto",
+            }, call_id="create"),
+            result("created", call_id="create"),
+        )
+        try:
+            payload = thy_write("lemma b by auto")
+            payload["transcript_path"] = path
+            code, err = run_hook(payload, ["--searchable", "auto"])
+            self.assertEqual(code, 2)
+            self.assertIn("method `auto`", err)
+        finally:
+            os.remove(path)
+
+    def test_read_only_open_file_preserves_search_evidence(self):
+        path = transcript_blocks(
+            use("repl_sledgehammer", call_id="search"),
+            result("Try this: by auto", call_id="search"),
+            use("mcp__iq-dev__open_file", {"path": "Existing.thy"}, call_id="open"),
+            result("opened", call_id="open"),
+        )
+        try:
+            payload = thy_write("lemma x by auto")
+            payload["transcript_path"] = path
+            code, err = run_hook(payload, ["--searchable", "auto"])
+            self.assertEqual(code, 0, err)
         finally:
             os.remove(path)
 

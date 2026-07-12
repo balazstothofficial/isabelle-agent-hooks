@@ -52,6 +52,8 @@ def thy_file(content):
 class ProtocolRecognition(unittest.TestCase):
     def test_namespaced_tool_aliases_match(self):
         self.assertTrue(protocol.is_mcp_write_tool("mcp__iq_dev__write_file"))
+        self.assertTrue(protocol.is_open_file_tool("mcp__iq_dev__open_file"))
+        self.assertTrue(protocol.is_proof_search_wrapper_tool("mcp__iq_dev__explore"))
         self.assertTrue(protocol.is_edit_tool_name("namespace.apply_patch"))
         self.assertTrue(protocol.is_exec_tool("functions.exec"))
 
@@ -69,6 +71,23 @@ class ToolCoverage(unittest.TestCase):
         })
         self.assertIsNotNone(check)
         self.assertIn("by auto", check)
+
+    def test_iq_open_file_create_checks_initial_content(self):
+        check, _ = run({
+            "tool_name": "mcp__iq-dev__open_file",
+            "tool_input": {
+                "path": "New.thy", "create_if_missing": True,
+                "content": "lemma x: True by metis",
+            },
+        })
+        self.assertIn("by metis", check)
+
+    def test_iq_open_file_read_has_no_edit(self):
+        check, _ = run({
+            "tool_name": "mcp__iq-dev__open_file",
+            "tool_input": {"path": "Existing.thy"},
+        })
+        self.assertIsNone(check)
 
     def test_whole_buffer_existing_file_checks_only_added_lines(self):
         old = 'theory T imports Main begin\nlemma old: "True" by auto\nend\n'

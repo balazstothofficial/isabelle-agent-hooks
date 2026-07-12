@@ -141,6 +141,18 @@ class NoApplyScripts(unittest.TestCase):
         code, err = run_hook(payload)
         self.assertEqual(code, 0, err)
 
+    def test_iq_open_file_create_blocks(self):
+        payload = {
+            "tool_name": "mcp__iq-dev__open_file",
+            "tool_input": {
+                "path": "New.thy", "create_if_missing": True,
+                "content": "lemma x: True\n  apply auto",
+            },
+        }
+        code, err = run_hook(payload)
+        self.assertEqual(code, 2)
+        self.assertIn("apply", err)
+
     def test_codex_functions_exec_can_remove_existing_apply(self):
         payload = {
             "tool_name": "functions.exec",
