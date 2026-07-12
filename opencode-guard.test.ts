@@ -17,8 +17,8 @@
 //
 // Run: bun test opencode-guard.test.ts
 import { test, expect, describe, beforeAll } from "bun:test";
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 
 const SOURCE = join(import.meta.dir, "opencode-guard.ts");
@@ -26,17 +26,49 @@ const SOURCE = join(import.meta.dir, "opencode-guard.ts");
 // works both locally and in CI (which has python3 on PATH).
 const INTERP = Bun.which("python3") || "python3";
 const REAL_NO_APPLY_HOOKS = [{ matcher: ".*write_file", script: "no_apply_scripts.py", args: [] }];
+const REAL_PACKAGE_SCRIPTS = Object.fromEntries(
+  readdirSync(join(import.meta.dir, "isabelle_hooks"))
+    .filter((name) => name.endsWith(".py"))
+    .map((name) => [
+      join("isabelle_hooks", name),
+      readFileSync(join(import.meta.dir, "isabelle_hooks", name), "utf8"),
+    ]),
+);
 const REAL_NO_APPLY_SCRIPTS = {
   "no_apply_scripts.py": readFileSync(join(import.meta.dir, "no_apply_scripts.py"), "utf8"),
   "isabelle_hook_common.py": readFileSync(join(import.meta.dir, "isabelle_hook_common.py"), "utf8"),
+  ...REAL_PACKAGE_SCRIPTS,
 };
 
 describe("shipped matcher compatibility", () => {
-  test("both guards accept optional functions.exec orchestration", () => {
+  test("the shared default accepts optional functions.exec orchestration", () => {
     const config = JSON.parse(readFileSync(join(import.meta.dir, "guards.json"), "utf8"));
-    const byScript = Object.fromEntries(config.hooks.map((hook) => [hook.script, hook.matcher]));
-    expect(byScript["no_apply_scripts.py"]).toContain("functions[.]exec");
-    expect(byScript["no_guessed_proofs.py"]).toContain("functions[.]exec");
+    expect(config.defaultMatcher).toContain("functions[.]exec");
+    expect(config.hooks.every((hook) => hook.matcher === undefined)).toBe(true);
+    expect(config.hooks.every((hook) => hook.args === undefined)).toBe(true);
+  });
+});
+
+describe("default matcher", () => {
+  test("hooks inherit the top-level matcher and may override it", async () => {
+    const root = makeWorktree({
+      hooks: {
+        "block.py": "import sys; sys.exit(2)\n",
+        "allow.py": "import sys; sys.exit(0)\n",
+      },
+      config: {
+        defaultMatcher: "Bash",
+        hooks: [
+          { script: "block.py" },
+          { script: "allow.py", matcher: "Write" },
+        ],
+      },
+    });
+    const m = await loadModule(root);
+    const plugin = await m.IsabelleGuards({ worktree: root });
+    await expect(
+      plugin["tool.execute.before"]({ tool: "bash" }, { args: { command: "x" } }),
+    ).rejects.toThrow(/block\.py/);
   });
 });
 
@@ -50,7 +82,9 @@ function makeWorktree({ hooks = {}, config = null } = {}) {
   mkdirSync(hooksDir, { recursive: true });
   mkdirSync(join(root, ".opencode", "plugins"), { recursive: true });
   for (const [name, body] of Object.entries(hooks)) {
-    writeFileSync(join(hooksDir, name), body);
+    const target = join(hooksDir, name);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, body);
   }
   if (config !== null) {
     writeFileSync(join(hooksDir, "guards.json"), typeof config === "string" ? config : JSON.stringify(config));
@@ -279,6 +313,22 @@ describe("tool.execute.before", () => {
     ).resolves.toBeUndefined();
   });
 
+  test("malformed hook descriptors are skipped and fail open", async () => {
+    const root = makeWorktree({
+      hooks: { "block.py": "import sys; sys.exit(2)\n" },
+      config: { hooks: [
+        {},
+        { matcher: "Bash", script: 42 },
+        { matcher: "Bash", script: "block.py", args: "not-an-array" },
+      ] },
+    });
+    const m = await loadModule(root);
+    const plugin = await m.IsabelleGuards({ worktree: root });
+    await expect(
+      plugin["tool.execute.before"]({ tool: "bash" }, { args: { command: "x" } }),
+    ).resolves.toBeUndefined();
+  });
+
   test('a "/" worktree sentinel does not derail guard resolution', async () => {
     // OpenCode passes worktree "/" when the project is not a git worktree. Guards
     // must still resolve from the plugin file (../hooks), so a real deny still fires
@@ -357,6 +407,49 @@ describe("transcript logging (escape-hatch evidence)", () => {
 
     expect(readTranscript(root)).toContainEqual(
       expect.objectContaining({ type: "tool_use", id: "non_git_call", name: "read" }),
+    );
+  });
+
+  test("a denied write is not logged and cannot poison a corrected retry", async () => {
+    const scripts = {
+      ...REAL_NO_APPLY_SCRIPTS,
+      "no_guessed_proofs.py": readFileSync(join(import.meta.dir, "no_guessed_proofs.py"), "utf8"),
+      "Hook_Searchable_Methods.thy": readFileSync(
+        join(import.meta.dir, "Hook_Searchable_Methods.thy"), "utf8",
+      ),
+    };
+    const root = makeWorktree({
+      hooks: scripts,
+      config: {
+        interpreter: INTERP,
+        hooks: [{
+          matcher: "Write",
+          script: "no_guessed_proofs.py",
+          args: ["--searchable", "auto", "--found-via", "sledgehammer"],
+        }],
+      },
+    });
+    const m = await loadModule(root);
+    const plugin = await m.IsabelleGuards({ worktree: root });
+
+    await plugin["tool.execute.before"](
+      { tool: "sledgehammer", callID: "search" }, { args: { goal: "True" } },
+    );
+    await plugin["tool.execute.after"](
+      { tool: "sledgehammer", callID: "search" }, { output: "Try this: by auto" },
+    );
+    await expect(plugin["tool.execute.before"](
+      { tool: "write", callID: "denied" },
+      { args: { filePath: "Foo.thy", content: "lemma a: True by auto\nlemma b: True by auto" } },
+    )).rejects.toThrow(/BLOCKED write/);
+    expect(readTranscript(root).some((block) => block.id === "denied")).toBe(false);
+
+    await expect(plugin["tool.execute.before"](
+      { tool: "write", callID: "corrected" },
+      { args: { filePath: "Foo.thy", content: "lemma a: True by auto" } },
+    )).resolves.toBeUndefined();
+    expect(readTranscript(root)).toContainEqual(
+      expect.objectContaining({ type: "tool_use", id: "corrected", name: "write" }),
     );
   });
 });

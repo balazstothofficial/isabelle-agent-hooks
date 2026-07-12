@@ -22,10 +22,10 @@
 //
 //   {
 //     "interpreter": "python3",              // optional; see INTERPRETER below
+//     "defaultMatcher": "<project matcher>",
 //     "hooks": [
-//       { "script": "no_guessed_proofs.py", "matcher": "Write|Edit|MultiEdit|Bash",
-//         "args": ["--window", "30", "--found-via", "sledgehammer", "try0"] },
-//       { "script": "no_apply_scripts.py",  "matcher": "Write|Edit|MultiEdit|Bash" }
+//       { "script": "no_guessed_proofs.py" },
+//       { "script": "no_apply_scripts.py" }
 //     ]
 //   }
 //
@@ -49,15 +49,28 @@ import { fileURLToPath } from "node:url";
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 const HOOKS_DIR = join(PLUGIN_DIR, "..", "hooks");
 
-// Read guards.json once at load. Shape: { interpreter?, hooks: [{script,matcher,args?}] }.
+// Read guards.json once at load. Shape:
+// { interpreter?, defaultMatcher?, hooks: [{script,matcher?,args?}] }.
 // Any read/parse failure fails open (empty hook list) so a misconfigured install
 // never bricks OpenCode.
 function loadConfig() {
   try {
     const cfg = JSON.parse(readFileSync(join(HOOKS_DIR, "guards.json"), "utf8"));
+    const defaultMatcher = cfg && typeof cfg.defaultMatcher === "string"
+      ? cfg.defaultMatcher : undefined;
+    const hooks = cfg && Array.isArray(cfg.hooks) ? cfg.hooks.flatMap((hook) => {
+      if (!hook || typeof hook !== "object"
+          || typeof hook.script !== "string" || hook.script.length === 0
+          || (hook.args !== undefined
+            && (!Array.isArray(hook.args)
+              || !hook.args.every((arg) => typeof arg === "string")))) return [];
+      const matcher = typeof hook.matcher === "string" ? hook.matcher : defaultMatcher;
+      return typeof matcher === "string" ? [{ ...hook, matcher }] : [];
+    }) : [];
     return {
-      interpreter: cfg && cfg.interpreter,
-      hooks: cfg && Array.isArray(cfg.hooks) ? cfg.hooks : [],
+      interpreter: cfg && typeof cfg.interpreter === "string" && cfg.interpreter
+        ? cfg.interpreter : undefined,
+      hooks,
     };
   } catch (e) {
     return { interpreter: undefined, hooks: [] };
@@ -65,7 +78,7 @@ function loadConfig() {
 }
 const CONFIG = loadConfig();
 
-// The interpreter that runs each guard. A Nix (or other packaged) install pins an
+// The interpreter that runs each guard. A packaged install can pin an
 // absolute python3 via guards.json; a plain install omits it and falls back to
 // $ISABELLE_HOOKS_PYTHON or `python3` on PATH.
 const INTERPRETER = CONFIG.interpreter || process.env.ISABELLE_HOOKS_PYTHON || "python3";
@@ -127,9 +140,6 @@ export const IsabelleGuards = async ({ worktree, directory }) => {
     "tool.execute.before": async (input, output) => {
       const tool = input.tool;
       const args = (output && output.args) || {};
-      // Record every call so the no-guessed-proofs escape hatch (a recent
-      // sledgehammer/try0) is visible to the guard on the next theory write.
-      logCall(input.callID, tool, args);
 
       const tname = claudeToolName(tool);
       const payload = JSON.stringify({
@@ -152,6 +162,10 @@ export const IsabelleGuards = async ({ worktree, directory }) => {
         }
         // Any other status (incl. spawn error) fails open, matching the guards.
       }
+      // Record only calls which every matching guard allowed. A denied edit never
+      // executes and therefore must not invalidate proof-search evidence on retry.
+      // Search calls are still logged before execution and paired in the after hook.
+      logCall(input.callID, tool, args);
     },
     "tool.execute.after": async (input, output) => {
       // Pair the result with its call (same callID) so a sledgehammer/try0 run's

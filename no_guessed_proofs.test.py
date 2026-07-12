@@ -16,28 +16,27 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import FrozenInstanceError
 from unittest import mock
+
+from hook_test_support import run_hook as run_hook_process, run_without_package, thy_write
 
 HOOKS_DIR = os.path.dirname(os.path.abspath(__file__))
 GUESSED = os.path.join(HOOKS_DIR, "no_guessed_proofs.py")
 
 sys.path.insert(0, HOOKS_DIR)
 import no_guessed_proofs as guessed
+from isabelle_hooks.config import DEFAULTS, GuardDefaults
+from isabelle_hooks import discovery
 
 
 def run_hook(payload, args=()):
-    """Run the guard as a subprocess; return (exit_code, stderr)."""
-    proc = subprocess.run(
-        [sys.executable, GUESSED, *args],
-        input=json.dumps(payload),
-        text=True,
-        capture_output=True,
-    )
-    return proc.returncode, proc.stderr
-
-
-def thy_write(content):
-    return {"tool_name": "Write", "tool_input": {"file_path": "Foo.thy", "content": content}}
+    args = list(args)
+    if "--isabelle-command" not in args and "--searchable" not in args:
+        # Policy tests which exercise discovery fallback must not depend on whether
+        # the developer machine happens to have Isabelle on PATH.
+        args.extend(["--isabelle-command", "/definitely/missing/isabelle"])
+    return run_hook_process(GUESSED, payload, args)
 
 
 def exec_call(source, transcript_path=None):
@@ -103,11 +102,23 @@ def transcript_blocks(*blocks, envelope=True):
 
 
 class ParseConfig(unittest.TestCase):
+    def test_defaults_have_one_immutable_owner(self):
+        self.assertEqual(guessed.DEFAULT_WINDOW, DEFAULTS.window)
+        self.assertEqual(guessed.DEFAULT_FOUND_VIA, DEFAULTS.found_via)
+        with self.assertRaises(FrozenInstanceError):
+            DEFAULTS.window = 99
+        self.assertEqual(
+            GuardDefaults(isabelle_command="custom").isabelle_command, "custom")
+
     def test_defaults(self):
         cfg = guessed.parse_config([])
         self.assertEqual(cfg.window, guessed.DEFAULT_WINDOW)
         self.assertEqual(cfg.allowed, set())
         self.assertEqual(cfg.found_via, list(guessed.DEFAULT_FOUND_VIA))
+        self.assertEqual(
+            cfg.isabelle_command,
+            os.environ.get("ISABELLE_HOOKS_ISABELLE", "isabelle"),
+        )
         self.assertIsNone(cfg.remediation)
 
     def test_window_and_allow(self):
@@ -118,6 +129,12 @@ class ParseConfig(unittest.TestCase):
     def test_bad_window_falls_back(self):
         cfg = guessed.parse_config(["--window", "notanint"])
         self.assertEqual(cfg.window, guessed.DEFAULT_WINDOW)
+
+    def test_nonpositive_window_falls_back(self):
+        for value in ("0", "-2"):
+            with self.subTest(value=value):
+                cfg = guessed.parse_config(["--window", value])
+                self.assertEqual(cfg.window, guessed.DEFAULT_WINDOW)
 
     def test_unknown_args_ignored(self):
         cfg = guessed.parse_config(["--bogus", "x", "--allow", "blast"])
@@ -149,10 +166,10 @@ class ParseConfig(unittest.TestCase):
 class MethodDiscovery(unittest.TestCase):
     def test_success_is_cached_and_reused(self):
         with tempfile.TemporaryDirectory() as cache:
-            with mock.patch.object(guessed, "_cache_root", return_value=cache), \
-                 mock.patch.object(guessed, "_discover_identity",
+            with mock.patch.object(discovery, "_cache_root", return_value=cache), \
+                 mock.patch.object(discovery, "_discover_identity",
                                    return_value=("/isabelle", "stable", "fingerprint")), \
-                 mock.patch.object(guessed, "_run_discovery",
+                 mock.patch.object(discovery, "_run_discovery",
                                    return_value={"auto", "metis"}) as run:
                 first, warning1 = guessed.discover_searchable_methods("isabelle_dev")
                 second, warning2 = guessed.discover_searchable_methods("isabelle_dev")
@@ -166,9 +183,9 @@ class MethodDiscovery(unittest.TestCase):
         with tempfile.TemporaryDirectory() as cache:
             identities = [("/isabelle", "stable", "one"),
                           ("/isabelle", "stable", "two")]
-            with mock.patch.object(guessed, "_cache_root", return_value=cache), \
-                 mock.patch.object(guessed, "_discover_identity", side_effect=identities), \
-                 mock.patch.object(guessed, "_run_discovery",
+            with mock.patch.object(discovery, "_cache_root", return_value=cache), \
+                 mock.patch.object(discovery, "_discover_identity", side_effect=identities), \
+                 mock.patch.object(discovery, "_run_discovery",
                                    side_effect=[{"auto"}, {"auto", "smt"}]) as run:
                 first, _ = guessed.discover_searchable_methods("isabelle_dev")
                 second, _ = guessed.discover_searchable_methods("isabelle_dev")
@@ -180,10 +197,10 @@ class MethodDiscovery(unittest.TestCase):
         with tempfile.TemporaryDirectory() as cache:
             with open(os.path.join(cache, "stable-old.json"), "w", encoding="utf-8") as f:
                 json.dump({"methods": ["auto", "metis"]}, f)
-            with mock.patch.object(guessed, "_cache_root", return_value=cache), \
-                 mock.patch.object(guessed, "_discover_identity",
+            with mock.patch.object(discovery, "_cache_root", return_value=cache), \
+                 mock.patch.object(discovery, "_discover_identity",
                                    return_value=("/isabelle", "stable", "new")), \
-                 mock.patch.object(guessed, "_run_discovery",
+                 mock.patch.object(discovery, "_run_discovery",
                                    side_effect=RuntimeError("boom")):
                 methods, warning = guessed.discover_searchable_methods("isabelle_dev")
             self.assertEqual(methods, {"auto", "metis"})
@@ -191,10 +208,10 @@ class MethodDiscovery(unittest.TestCase):
 
     def test_failure_without_cache_returns_none_not_empty_set(self):
         with tempfile.TemporaryDirectory() as cache:
-            with mock.patch.object(guessed, "_cache_root", return_value=cache), \
-                 mock.patch.object(guessed, "_discover_identity",
+            with mock.patch.object(discovery, "_cache_root", return_value=cache), \
+                 mock.patch.object(discovery, "_discover_identity",
                                    return_value=("/isabelle", "stable", "new")), \
-                 mock.patch.object(guessed, "_run_discovery",
+                 mock.patch.object(discovery, "_run_discovery",
                                    side_effect=RuntimeError("boom")):
                 methods, warning = guessed.discover_searchable_methods("isabelle_dev")
             self.assertIsNone(methods)
@@ -208,6 +225,44 @@ class MethodDiscovery(unittest.TestCase):
 
 
 class NoGuessedProofs(unittest.TestCase):
+    def test_missing_shared_package_fails_open_cleanly(self):
+        code, err = run_without_package(GUESSED, thy_write("lemma x by auto"))
+        self.assertEqual(code, 0, err)
+        self.assertIn("shared helper unavailable", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_multiedit_prior_state_change_exposes_guess(self):
+        fd, path = tempfile.mkstemp(suffix=".thy")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write("text ‹intro›\ntext ‹PLACEHOLDER›\n")
+            payload = {"tool_name": "MultiEdit", "tool_input": {
+                "file_path": path, "edits": [
+                    {"old_string": "text ‹intro›\ntext ‹",
+                     "new_string": "text ‹intro›\n"},
+                    {"old_string": "PLACEHOLDER›", "new_string": "by auto"},
+                ]}}
+            code, err = run_hook(payload, ["--searchable", "auto"])
+            self.assertEqual(code, 2, err)
+        finally:
+            os.remove(path)
+
+    def test_multiedit_prior_state_change_makes_guess_prose(self):
+        fd, path = tempfile.mkstemp(suffix=".thy")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write("text ‹intro›\nPLACEHOLDER\n")
+            payload = {"tool_name": "MultiEdit", "tool_input": {
+                "file_path": path, "edits": [
+                    {"old_string": "text ‹intro›\n",
+                     "new_string": "text ‹intro›\ntext ‹"},
+                    {"old_string": "PLACEHOLDER\n", "new_string": "by auto›\n"},
+                ]}}
+            code, err = run_hook(payload, ["--searchable", "auto"])
+            self.assertEqual(code, 0, err)
+        finally:
+            os.remove(path)
+
     def test_allow_listed_method_passes(self):
         code, _ = run_hook(thy_write("lemma x by auto"), ["--allow", "auto", "simp"])
         self.assertEqual(code, 0)
@@ -828,6 +883,19 @@ class NoGuessedProofs(unittest.TestCase):
         # A path like try0_results.thy mentions "try0" but is not a try0 run; the
         # word boundary must keep it from tripping the escape hatch.
         path = transcript_with_calls(("Edit", {"file_path": "experiments/try0_results.thy"}))
+        try:
+            payload = thy_write("lemma x by metis")
+            payload["transcript_path"] = path
+            code, _ = run_hook(payload, ["--window", "20"])
+            self.assertEqual(code, 2)
+        finally:
+            os.remove(path)
+
+    def test_incidental_try0_tool_name_suffix_does_not_escape(self):
+        path = transcript_blocks(
+            use("try0_results", call_id="not_search"),
+            result("Try this: by metis", call_id="not_search"),
+        )
         try:
             payload = thy_write("lemma x by metis")
             payload["transcript_path"] = path

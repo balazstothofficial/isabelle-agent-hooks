@@ -13,8 +13,10 @@ functions.exec, the iq-dev MCP write_file/save_file, and the isabelle-pide-mcp
 `edit` tool. Non-theory writes are never blocked. Fails OPEN on internal errors.
 """
 import sys, re
+
 try:
-    from isabelle_hook_common import extract_thy_edits
+    from isabelle_hooks.protocol import BLOCK_EXIT
+    from isabelle_hooks.edits import extract_thy_edits
 except Exception as _e:
     # Fail OPEN, but say so: a missing/broken helper silently disables the guard.
     # Non-blocking (still exit 0) so it can never brick the workflow.
@@ -48,7 +50,7 @@ def main():
         "`proof (rule ...)`).\n"
     )
     sys.stderr.write(msg)
-    sys.exit(2)  # exit 2 => PreToolUse block, stderr fed back to the model
+    sys.exit(BLOCK_EXIT)  # stderr is fed back to the model
 
 
 if __name__ == "__main__":

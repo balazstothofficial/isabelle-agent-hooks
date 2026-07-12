@@ -1,13 +1,11 @@
 {
+  "defaultMatcher": "Write|Edit|MultiEdit|Bash|apply_patch|.*write_file|.*save_file|functions[.]exec",
   "hooks": [
     {
-      "script": "no_guessed_proofs.py",
-      "matcher": "Write|Edit|MultiEdit|Bash|apply_patch|.*write_file|.*save_file|functions[.]exec",
-      "args": ["--window", "30", "--found-via", "sledgehammer", "try0"]
+      "script": "no_guessed_proofs.py"
     },
     {
-      "script": "no_apply_scripts.py",
-      "matcher": "Write|Edit|MultiEdit|Bash|apply_patch|.*write_file|.*save_file|functions[.]exec"
+      "script": "no_apply_scripts.py"
     }
   ]
 }

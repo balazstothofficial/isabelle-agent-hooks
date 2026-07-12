@@ -9,32 +9,26 @@ contract -- so the test sees the exact exit code the agent harness
 
 Run directly: python3 no_apply_scripts.test.py
 """
-import json
 import os
-import subprocess
-import sys
 import unittest
+
+from hook_test_support import run_hook as run_hook_process, run_without_package, thy_write
 
 HOOKS_DIR = os.path.dirname(os.path.abspath(__file__))
 APPLY = os.path.join(HOOKS_DIR, "no_apply_scripts.py")
 
 
 def run_hook(payload):
-    """Run the guard as a subprocess; return (exit_code, stderr)."""
-    proc = subprocess.run(
-        [sys.executable, APPLY],
-        input=json.dumps(payload),
-        text=True,
-        capture_output=True,
-    )
-    return proc.returncode, proc.stderr
-
-
-def thy_write(content):
-    return {"tool_name": "Write", "tool_input": {"file_path": "Foo.thy", "content": content}}
+    return run_hook_process(APPLY, payload)
 
 
 class NoApplyScripts(unittest.TestCase):
+    def test_missing_shared_package_fails_open_cleanly(self):
+        code, err = run_without_package(APPLY, thy_write("apply auto"))
+        self.assertEqual(code, 0, err)
+        self.assertIn("shared helper unavailable", err)
+        self.assertNotIn("Traceback", err)
+
     def test_apply_paren_blocks(self):
         code, err = run_hook(thy_write("lemma x\n  apply (rule foo)"))
         self.assertEqual(code, 2)

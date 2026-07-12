@@ -18,6 +18,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import isabelle_hook_common as hook
+from isabelle_hooks import protocol
 
 
 def run(payload):
@@ -46,6 +47,18 @@ def thy_file(content):
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(content)
     return path
+
+
+class ProtocolRecognition(unittest.TestCase):
+    def test_namespaced_tool_aliases_match(self):
+        self.assertTrue(protocol.is_mcp_write_tool("mcp__iq_dev__write_file"))
+        self.assertTrue(protocol.is_edit_tool_name("namespace.apply_patch"))
+        self.assertTrue(protocol.is_exec_tool("functions.exec"))
+
+    def test_incidental_tool_name_substrings_do_not_match(self):
+        self.assertFalse(protocol.is_edit_tool_name("credit_report"))
+        self.assertFalse(protocol.is_mcp_write_tool("overwrite_filename"))
+        self.assertFalse(protocol.tool_name_ends_with("try0_results", "try0"))
 
 
 class ToolCoverage(unittest.TestCase):
@@ -109,6 +122,67 @@ class ToolCoverage(unittest.TestCase):
             self.assertEqual(len(fragments), 2)
             self.assertNotIn("by auto", fragments[0].text)
             self.assertIn("by auto", fragments[1].text)
+        finally:
+            os.remove(path)
+
+    def test_multiedit_uses_prior_deletion_to_expose_later_code(self):
+        path = thy_file("text ‹intro›\ntext ‹PLACEHOLDER›\n")
+        try:
+            fragments, _ = run_fragments({
+                "tool_name": "MultiEdit",
+                "tool_input": {"file_path": path, "edits": [
+                    {"old_string": "text ‹intro›\ntext ‹",
+                     "new_string": "text ‹intro›\n"},
+                    {"old_string": "PLACEHOLDER›", "new_string": "by auto"},
+                ]},
+            })
+            self.assertIn("by auto", "\n".join(f.text for f in fragments))
+        finally:
+            os.remove(path)
+
+    def test_multiedit_uses_prior_insertion_to_hide_later_prose(self):
+        path = thy_file("text ‹intro›\nPLACEHOLDER\n")
+        try:
+            fragments, _ = run_fragments({
+                "tool_name": "MultiEdit",
+                "tool_input": {"file_path": path, "edits": [
+                    {"old_string": "text ‹intro›\n",
+                     "new_string": "text ‹intro›\ntext ‹"},
+                    {"old_string": "PLACEHOLDER\n", "new_string": "by auto›\n"},
+                ]},
+            })
+            self.assertNotIn("by auto", "\n".join(f.text for f in fragments))
+        finally:
+            os.remove(path)
+
+    def test_functions_exec_nested_writes_share_ordered_snapshot(self):
+        path = thy_file("text ‹intro›\ntext ‹PLACEHOLDER›\n")
+        try:
+            calls = [
+                {"path": path, "old_str": "text ‹intro›\ntext ‹",
+                 "new_str": "text ‹intro›\n"},
+                {"path": path, "old_str": "PLACEHOLDER›", "new_str": "by auto"},
+            ]
+            source = "\n".join(
+                "await tools.mcp__iq_dev__write_file(" + json.dumps(call) + ");"
+                for call in calls
+            )
+            fragments, _ = run_fragments({
+                "tool_name": "functions.exec", "tool_input": {"code": source},
+            })
+            self.assertIn("by auto", "\n".join(f.text for f in fragments))
+        finally:
+            os.remove(path)
+
+    def test_functions_exec_unresolved_replace_keeps_fragment_fallback(self):
+        path = thy_file("theory T imports Main begin\nend\n")
+        try:
+            call = {"path": path, "old_str": "missing", "new_str": "by auto"}
+            source = "await tools.mcp__iq_dev__write_file(" + json.dumps(call) + ");"
+            fragments, _ = run_fragments({
+                "tool_name": "functions.exec", "tool_input": {"code": source},
+            })
+            self.assertIn("by auto", "\n".join(f.text for f in fragments))
         finally:
             os.remove(path)
 

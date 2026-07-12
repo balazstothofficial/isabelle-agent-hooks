@@ -1,11 +1,17 @@
 # Isabelle agent hooks
 
-PreToolUse guards that reject Isabelle `apply` scripts and proof methods guessed
-without recent proof-search evidence.
+PreToolUse guards that enforce two Isabelle proof-discipline rules:
 
-## Contract
+- use structured Isar instead of `apply` scripts;
+- use search-discoverable proof methods only after recent `sledgehammer` or `try0`
+  evidence.
 
-Each script reads one JSON object from standard input:
+The guards inspect only text added to `.thy` files. Unsupported or malformed calls
+fail open rather than blocking the agent.
+
+## Hook contract
+
+Each Python entry point reads one JSON object from standard input:
 
 ```json
 {
@@ -15,100 +21,81 @@ Each script reads one JSON object from standard input:
 }
 ```
 
-- Exit `0`: allow the tool call.
-- Exit `2`: block it and return the explanation on standard error.
-- Malformed input and internal errors fail open.
+- Exit `0`: allow the call.
+- Exit `2`: block it and explain why on standard error.
+- Malformed input, missing dependencies, and internal errors fail open.
 
-Install `no_apply_scripts.py` and `no_guessed_proofs.py` beside
-`isabelle_hook_common.py`. The guessed-proof guard also requires
-`Hook_Searchable_Methods.thy`.
+Install these files together:
 
-## Options
+- `no_apply_scripts.py`
+- `no_guessed_proofs.py`
+- `isabelle_hook_common.py`
+- `Hook_Searchable_Methods.thy`
+- the complete `isabelle_hooks/` package
+
+## Configuration
 
 `no_apply_scripts.py` takes no arguments. `no_guessed_proofs.py` accepts:
 
-- `--window N`: number of recent transcript tool calls to inspect.
-- `--allow M1 M2 ...`: fallback methods if Isabelle discovery and caches fail.
-- `--found-via T1 T2 ...`: proof-search tools whose results count as evidence.
-- `--remediation TEXT`: replacement `Fix:` text in the block message.
-- `--isabelle-command CMD`: pinned Isabelle launcher used for discovery.
-- `--searchable M1 M2 ...`: explicit searchable-method override for diagnostics.
+- `--window N`: recent transcript calls to inspect;
+- `--allow M1 M2 ...`: fallback methods when discovery and caches fail;
+- `--found-via T1 T2 ...`: proof-search tools that may provide evidence;
+- `--remediation TEXT`: replacement `Fix:` text in block messages;
+- `--isabelle-command CMD`: Isabelle launcher, defaulting to
+  `$ISABELLE_HOOKS_ISABELLE` and then `isabelle` on `PATH`;
+- `--searchable M1 M2 ...`: explicit method registry for diagnostics and tests.
 
-## Agent wiring
-
-Claude Code uses `.claude/settings.local.json`; Codex uses the same PreToolUse shape
-in `.codex/hooks.json`. A command entry is:
+Claude Code and Codex can invoke a guard directly from their PreToolUse config:
 
 ```json
 {
   "type": "command",
-  "command": "python3 HOOK_DIR/no_guessed_proofs.py --window 30 --found-via sledgehammer try0"
+  "command": "python3 HOOK_DIR/no_guessed_proofs.py"
 }
 ```
 
-Use this matcher for both guards:
+Use `defaultMatcher` from [`guards.json`](guards.json) for both guards. It covers the
+standard write/edit tools, common MCP file writers, `apply_patch`, Bash, and optional
+`functions.exec` orchestration. Nested literal writes and proof-search calls inside
+`functions.exec` are normalized through the same parsers as direct calls.
 
-```text
-Write|Edit|MultiEdit|Bash|apply_patch|.*write_file|.*save_file|functions[.]exec
-```
+Only configure tools whose write payload the guards understand. An unrecognized
+payload is allowed because the hooks never block text they could not inspect.
 
-The extra alternative is inert in clients that do not expose `functions.exec`, so
-the same matchers are safe in Claude, direct-tool Codex, and OpenCode. When a Codex
-version wraps a write in `functions.exec`, both guards unwrap literal nested
-`write_file`, `apply_patch`, and shell-write calls and check them through the same
-direct parser. The guessed-proof guard also normalizes nested proof-search and write
-calls in the transcript so evidence remains current and single-use. The shipped
-`guards.json` already carries these matchers.
+## OpenCode
 
-OpenCode has no JSON hook config, so this repo ships a ready-to-use plugin,
-`opencode-guard.ts`, that does the `tool.execute.before` bridging for you (it maps
-OpenCode's tool name and arguments to `tool_name`/`tool_input`, sends the JSON to
-each Python guard, rejects exit `2` with stderr, allows exit `0`, and logs a paired
-tool call + result transcript so the guessed-proof escape hatch keeps working).
+OpenCode uses the included `opencode-guard.ts` plugin to bridge
+`tool.execute.before` and `tool.execute.after` to the Python contract. The plugin also
+maintains a per-worktree transcript so proof-search evidence remains current and
+single-use.
 
 To install it in a project:
 
-1. Copy these four files into `.opencode/hooks/`: `no_apply_scripts.py`,
-   `no_guessed_proofs.py`, `isabelle_hook_common.py`, and
-   `Hook_Searchable_Methods.thy`.
-2. Copy `guards.json` into `.opencode/hooks/` too, and edit its hook list/args to
-   taste.
-3. Copy `opencode-guard.ts` into `.opencode/plugins/`.
+1. Copy the Python files, `Hook_Searchable_Methods.thy`, `guards.json`, and the
+   `isabelle_hooks/` package into `.opencode/hooks/`.
+2. Copy `opencode-guard.ts` into `.opencode/plugins/`.
+3. Adjust the hook list or arguments in `.opencode/hooks/guards.json` if needed.
 
-`guards.json` configures the plugin (read once at load from the hooks directory):
+The plugin reads `guards.json` once at startup:
 
 ```json
 {
   "interpreter": "python3",
+  "defaultMatcher": "...",
   "hooks": [
-    { "script": "no_guessed_proofs.py", "matcher": "Write|Edit|MultiEdit|Bash",
-      "args": ["--window", "30", "--found-via", "sledgehammer", "try0"] },
-    { "script": "no_apply_scripts.py", "matcher": "Write|Edit|MultiEdit|Bash" }
+    {"script": "no_guessed_proofs.py"},
+    {"script": "no_apply_scripts.py"}
   ]
 }
 ```
 
-- `interpreter` is optional; it defaults to `$ISABELLE_HOOKS_PYTHON`, then `python3`
-  on `PATH`. Point it at a specific interpreter when the guards need pinned deps.
-- Each `matcher` is a JavaScript regex tested against both OpenCode's tool id
-  (`bash`, `edit`, …) and its mapped Claude name (`Bash`, `Edit`, …).
-- A missing or invalid `guards.json` fails open (no guards run) rather than blocking
-  every tool call.
+`interpreter` is optional and falls back to `$ISABELLE_HOOKS_PYTHON`, then `python3`
+on `PATH`. Hooks may override `defaultMatcher` with their own `matcher`. Missing or
+invalid configuration fails open and runs no guards.
 
-## Which tools the guards check
+## Code layout
 
-For each tool call, the guards look inside it to find the file being edited and the
-text being written, then check that text for `apply` scripts and guessed proofs.
-
-You choose which tools they run on with the `matcher` in your hook config (for
-example `Write|Edit|MultiEdit|Bash`). The guards already understand the standard
-edit tools — `Write`, `Edit`, `MultiEdit`, `Bash`, and common MCP write tools — so
-in most setups this works out of the box and you don't need to do anything.
-
-One thing to watch: **the guards can only check a tool whose contents they can
-read.** If you point the matcher at an unusual edit tool they don't recognize, they
-won't find any text to inspect and will let the edit through without checking it —
-they never block a call just because they couldn't read it. So only add a tool to
-the matcher if you've confirmed the guards actually catch edits made with it (write
-a proof with an `apply` script through that tool and check that it gets blocked). If
-a tool you rely on isn't being caught, open an issue.
+The two entry points own guard-specific policy, arguments, diagnostics, and control
+flow. `isabelle_hooks/config.py` owns built-in defaults; the rest of the package owns
+shared protocol, edit, syntax, discovery, method, and transcript mechanisms.
+`isabelle_hook_common.py` preserves the historical shared import surface.
