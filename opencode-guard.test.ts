@@ -13,6 +13,7 @@
 //     any other status => fail open, missing script => fail open, missing/invalid
 //     guards.json => fail open, and guard resolution surviving a "/" worktree sentinel
 //   * tool.execute.after transcript logging -- the escape-hatch evidence shape
+//   * Node/Bun-compatible plugin-relative paths and non-Git transcript isolation
 //
 // Run: bun test opencode-guard.test.ts
 import { test, expect, describe, beforeAll } from "bun:test";
@@ -343,5 +344,19 @@ describe("transcript logging (escape-hatch evidence)", () => {
     const blocks = readTranscript(root);
     expect(blocks).toHaveLength(1);
     expect(blocks[0]).toEqual({ type: "tool_result", tool_use_id: "call_9", content: "" });
+  });
+
+  test('a "/" worktree sentinel uses the project directory as the transcript key', async () => {
+    const root = makeWorktree({ config: { hooks: [] } });
+    const m = await loadModule(root);
+    const plugin = await m.IsabelleGuards({ worktree: "/", directory: root });
+    await plugin["tool.execute.before"](
+      { tool: "read", callID: "non_git_call" },
+      { args: { filePath: "Probe.thy" } },
+    );
+
+    expect(readTranscript(root)).toContainEqual(
+      expect.objectContaining({ type: "tool_use", id: "non_git_call", name: "read" }),
+    );
   });
 });

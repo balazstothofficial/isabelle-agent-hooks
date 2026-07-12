@@ -1,6 +1,6 @@
 // @ts-nocheck -- standalone OpenCode/Bun plugin, not part of a TS project: there is
 // no tsconfig or @types/node here, so suppress editor semantic errors (node: imports,
-// implicit any). Bun/OpenCode type-check and run it at load; this is an inert comment.
+// implicit any). OpenCode type-checks and runs it at load; this is an inert comment.
 //
 // OpenCode adapter for the Isabelle agent hooks.
 //
@@ -33,8 +33,9 @@
 // every tool call.
 import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 
 // The Python guards (and guards.json) live in `../hooks` relative to THIS plugin
 // file, never a host-supplied cwd/worktree: OpenCode passes "/" as its "no git
@@ -42,8 +43,11 @@ import { tmpdir } from "node:os";
 // under the filesystem root ("/.opencode/hooks/..."), where python exits 2 on the
 // missing file and every tool call is denied. The plugin ships at
 // .opencode/plugins/<name>.ts and is loaded via `await import(path)`, so `../hooks`
-// is a stable sibling regardless of cwd.
-const HOOKS_DIR = join(import.meta.dir, "..", "hooks");
+// is a stable sibling regardless of cwd. Resolve through the standard ESM URL:
+// OpenCode CLI runs plugins under Bun (which provides import.meta.dir), while the
+// desktop app runs them under Node (which does not). import.meta.url works in both.
+const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
+const HOOKS_DIR = join(PLUGIN_DIR, "..", "hooks");
 
 // Read guards.json once at load. Shape: { interpreter?, hooks: [{script,matcher,args?}] }.
 // Any read/parse failure fails open (empty hook list) so a misconfigured install
@@ -91,8 +95,9 @@ function toolInput(tool, args) {
 
 export const IsabelleGuards = async ({ worktree, directory }) => {
   // worktree/directory are used only as a best-effort key for the per-worktree
-  // transcript path (uniqueness across checkouts); "/" or "" just share one file.
-  const root = worktree || directory || process.cwd();
+  // transcript path (uniqueness across checkouts). OpenCode uses "/" as the
+  // no-Git-worktree sentinel, so prefer its real project directory in that case.
+  const root = worktree && worktree !== "/" ? worktree : directory || process.cwd();
   const transcript = join(tmpdir(), "opencode-isabelle-guard-" + encodeURIComponent(root) + ".jsonl");
 
   // Append one content block, wrapped as the {"message":{"content":[…]}} envelope
