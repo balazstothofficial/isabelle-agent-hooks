@@ -45,31 +45,64 @@ Install these files together:
   `$ISABELLE_HOOKS_ISABELLE` and then `isabelle` on `PATH`;
 - `--searchable M1 M2 ...`: explicit method registry for diagnostics and tests.
 
-Claude Code and Codex can invoke a guard directly from their PreToolUse config:
+## Installation by coding agent
+
+### Claude Code
+
+Copy the Python files, `Hook_Searchable_Methods.thy`, and the `isabelle_hooks/`
+package into `<repo>/.claude/hooks/`. Add both guards as `PreToolUse` command hooks
+in one of these files:
+
+- `<repo>/.claude/settings.local.json` for a local, uncommitted setup;
+- `<repo>/.claude/settings.json` for configuration shared with the project.
+
+A command hook entry looks like this:
 
 ```json
 {
   "type": "command",
-  "command": "python3 HOOK_DIR/no_guessed_proofs.py"
+  "command": "python3 .claude/hooks/no_guessed_proofs.py"
 }
 ```
 
-Use `defaultMatcher` from [`guards.json`](guards.json) for both guards. It covers the
-standard write/edit tools, common MCP file writers, `apply_patch`, Bash, and optional
-`functions.exec` orchestration. Nested literal writes and proof-search calls inside
-`functions.exec` are normalized through the same parsers as direct calls.
+Use `defaultMatcher` from [`guards.json`](guards.json) as the matcher for both hook
+entries.
+
+### Codex
+
+Copy the same hook bundle into `<repo>/.codex/hooks/`. Add both `PreToolUse` command
+hooks to `<repo>/.codex/hooks.json`; Codex also supports inline hooks in the adjacent
+`<repo>/.codex/config.toml`. For example, a command entry in `hooks.json` is:
+
+```json
+{
+  "type": "command",
+  "command": "python3 .codex/hooks/no_guessed_proofs.py"
+}
+```
+
+Copy `defaultMatcher` from [`guards.json`](guards.json) into both Codex hook entries.
+Project hooks load only for trusted projects. In the Codex desktop app, open
+**Settings → Hooks**, review the discovered hooks, and approve them; unapproved hooks
+do not run.
+
+For Claude Code and Codex, `guards.json` is the canonical matcher reference but is
+not loaded automatically. The matcher covers standard write/edit tools, common MCP
+file writers, `apply_patch`, Bash, and optional `functions.exec` orchestration.
+Nested literal writes and proof-search calls inside `functions.exec` are normalized
+through the same parsers as direct calls.
 
 Only configure tools whose write payload the guards understand. An unrecognized
 payload is allowed because the hooks never block text they could not inspect.
 
-## OpenCode
+### OpenCode
 
 OpenCode uses the included `opencode-guard.ts` plugin to bridge
 `tool.execute.before` and `tool.execute.after` to the Python contract. The plugin also
 maintains a per-worktree transcript so proof-search evidence remains current and
 single-use.
 
-To install it in a project:
+To install it:
 
 1. Copy the Python files, `Hook_Searchable_Methods.thy`, `guards.json`, and the
    `isabelle_hooks/` package into `.opencode/hooks/`.
