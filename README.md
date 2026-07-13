@@ -1,13 +1,14 @@
 # Isabelle agent hooks
 
-PreToolUse guards that enforce two Isabelle proof-discipline rules:
+Experimental, best-effort PreToolUse guards for two Isabelle proof-discipline rules:
 
 - use structured Isar instead of `apply` scripts;
 - use search-discoverable proof methods only after recent `sledgehammer` or `try0`
   evidence.
 
-The guards inspect only text added to `.thy` files. Unsupported or malformed calls
-fail open rather than blocking the agent.
+The guards inspect only text added to `.thy` files. They are guardrails, not a complete
+enforcement boundary: unsupported or malformed calls fail open rather than blocking
+the agent, and coding-agent hook and transcript interfaces may change over time.
 
 Both AutoCorrode's I/Q MCP server and `isabelle-pide-mcp` are supported, alongside
 the coding agents' standard file read/write/edit tools.
@@ -80,9 +81,13 @@ hooks to `<repo>/.codex/hooks.json`; Codex also supports inline hooks in the adj
 ```json
 {
   "type": "command",
-  "command": "python3 .codex/hooks/no_guessed_proofs.py"
+  "command": "root=\"$(hg root 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null || pwd)\"; python3 \"$root/.codex/hooks/no_guessed_proofs.py\""
 }
 ```
+
+This resolves the repository root from Mercurial or Git before falling back to the
+current directory, so the hook still finds its script when Codex starts in a
+subdirectory. Use the same prefix for `no_apply_scripts.py`.
 
 Copy `defaultMatcher` from [`guards.json`](guards.json) into both Codex hook entries.
 Project hooks load only for trusted projects. In the Codex desktop app, open
