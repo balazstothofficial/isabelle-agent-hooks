@@ -89,18 +89,24 @@ This resolves the repository root from Mercurial or Git before falling back to t
 current directory, so the hook still finds its script when Codex starts in a
 subdirectory. Use the same prefix for `no_apply_scripts.py`.
 
-Copy `defaultMatcher` from [`guards.json`](guards.json) into both Codex hook entries.
 Project hooks load only for trusted projects. In the Codex desktop app, open
 **Settings → Hooks**, review the discovered hooks, and approve them; unapproved hooks
 do not run.
 
-For Claude Code and Codex, `guards.json` is the canonical matcher reference but is
-not loaded automatically. The matcher covers standard write/edit tools, AutoCorrode
-I/Q's `write_file`, `save_file`, and mutating `open_file` calls,
-`isabelle-pide-mcp`'s `edit` tool, `apply_patch`, Bash, and optional `functions.exec`
-orchestration.
-Nested literal writes and proof-search calls inside `functions.exec` are normalized
-through the same parsers as direct calls.
+For both Claude Code and Codex, [`guards.json`](guards.json) is only a reference file:
+neither agent loads it automatically. Copy its `defaultMatcher` value into the
+matcher field of each configured hook. It routes these tool calls to the guards:
+
+- standard write, edit, and shell tools;
+- `apply_patch`;
+- AutoCorrode I/Q's `write_file`, `save_file`, and `open_file` tools;
+- `isabelle-pide-mcp`'s `edit` tool;
+- optionally, `functions.exec` orchestration.
+
+After a call matches, the Python code determines whether it actually changes a
+`.thy` file; for example, a read-only I/Q `open_file` call is allowed. For
+`functions.exec`, nested writes and proof searches are recognized when their tool
+names and arguments are literal values in the JavaScript source.
 
 Only configure tools whose write payload the guards understand. An unrecognized
 payload is allowed because the hooks never block text they could not inspect.
