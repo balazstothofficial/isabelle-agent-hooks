@@ -1,4 +1,4 @@
-"""Shared subprocess and payload fixtures for hook contract tests."""
+"""Shared subprocess and payload helpers for hook contract tests."""
 import json
 import os
 import shutil

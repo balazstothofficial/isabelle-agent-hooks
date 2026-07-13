@@ -148,3 +148,4 @@ The two entry points own guard-specific policy, arguments, diagnostics, and cont
 flow. `isabelle_hooks/config.py` owns built-in defaults; the rest of the package owns
 shared protocol, edit, syntax, discovery, method, and transcript mechanisms.
 `isabelle_hook_common.py` preserves the historical shared import surface.
+Contract and adapter tests live in `test/`.

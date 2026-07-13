@@ -15,34 +15,35 @@
 //   * tool.execute.after transcript logging -- the escape-hatch evidence shape
 //   * Node/Bun-compatible plugin-relative paths and non-Git transcript isolation
 //
-// Run: bun test opencode-guard.test.ts
+// Run: bun test test/opencode-guard.test.ts
 import { test, expect, describe, beforeAll } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, existsSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 
-const SOURCE = join(import.meta.dir, "opencode-guard.ts");
+const ROOT = join(import.meta.dir, "..");
+const SOURCE = join(ROOT, "opencode-guard.ts");
 // A real interpreter to stand in for a packaged python3. Resolved at runtime so this
 // works both locally and in CI (which has python3 on PATH).
 const INTERP = Bun.which("python3") || "python3";
 const REAL_NO_APPLY_HOOKS = [{ matcher: ".*write_file", script: "no_apply_scripts.py", args: [] }];
 const REAL_PACKAGE_SCRIPTS = Object.fromEntries(
-  readdirSync(join(import.meta.dir, "isabelle_hooks"))
+  readdirSync(join(ROOT, "isabelle_hooks"))
     .filter((name) => name.endsWith(".py"))
     .map((name) => [
       join("isabelle_hooks", name),
-      readFileSync(join(import.meta.dir, "isabelle_hooks", name), "utf8"),
+      readFileSync(join(ROOT, "isabelle_hooks", name), "utf8"),
     ]),
 );
 const REAL_NO_APPLY_SCRIPTS = {
-  "no_apply_scripts.py": readFileSync(join(import.meta.dir, "no_apply_scripts.py"), "utf8"),
-  "isabelle_hook_common.py": readFileSync(join(import.meta.dir, "isabelle_hook_common.py"), "utf8"),
+  "no_apply_scripts.py": readFileSync(join(ROOT, "no_apply_scripts.py"), "utf8"),
+  "isabelle_hook_common.py": readFileSync(join(ROOT, "isabelle_hook_common.py"), "utf8"),
   ...REAL_PACKAGE_SCRIPTS,
 };
 
 describe("shipped matcher compatibility", () => {
   test("the shared default accepts optional functions.exec orchestration", () => {
-    const config = JSON.parse(readFileSync(join(import.meta.dir, "guards.json"), "utf8"));
+    const config = JSON.parse(readFileSync(join(ROOT, "guards.json"), "utf8"));
     expect(config.defaultMatcher).toContain("functions[.]exec");
     const matcher = new RegExp(config.defaultMatcher);
     expect(matcher.test("mcp__isabelle-pide-mcp__edit")).toBe(true);
@@ -417,9 +418,9 @@ describe("transcript logging (escape-hatch evidence)", () => {
   test("a denied write is not logged and cannot poison a corrected retry", async () => {
     const scripts = {
       ...REAL_NO_APPLY_SCRIPTS,
-      "no_guessed_proofs.py": readFileSync(join(import.meta.dir, "no_guessed_proofs.py"), "utf8"),
+      "no_guessed_proofs.py": readFileSync(join(ROOT, "no_guessed_proofs.py"), "utf8"),
       "Hook_Searchable_Methods.thy": readFileSync(
-        join(import.meta.dir, "Hook_Searchable_Methods.thy"), "utf8",
+        join(ROOT, "Hook_Searchable_Methods.thy"), "utf8",
       ),
     };
     const root = makeWorktree({

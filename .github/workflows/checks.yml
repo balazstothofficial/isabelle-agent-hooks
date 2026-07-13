@@ -24,8 +24,8 @@ jobs:
         run: ruff check --select F .
       - name: Test
         run: |
-          python isabelle_hook_common.test.py
-          python no_guessed_proofs.test.py
-          python no_apply_scripts.test.py
+          python test/isabelle_hook_common.test.py
+          python test/no_guessed_proofs.test.py
+          python test/no_apply_scripts.test.py
       - name: Test OpenCode plugin
-        run: bun test opencode-guard.test.ts
+        run: bun test test/opencode-guard.test.ts

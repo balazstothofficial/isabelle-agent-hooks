@@ -8,7 +8,7 @@ driven here as a subprocess -- the real harness contract -- so the test sees the
 exact exit code the agent harness (Claude/Codex/OpenCode) acts on. parse_config
 is tested in-process.
 
-Run directly: python3 no_guessed_proofs.test.py
+Run directly: python3 test/no_guessed_proofs.test.py
 """
 import json
 import os
@@ -21,10 +21,10 @@ from unittest import mock
 
 from hook_test_support import run_hook as run_hook_process, run_without_package, thy_write
 
-HOOKS_DIR = os.path.dirname(os.path.abspath(__file__))
-GUESSED = os.path.join(HOOKS_DIR, "no_guessed_proofs.py")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+GUESSED = os.path.join(ROOT, "no_guessed_proofs.py")
 
-sys.path.insert(0, HOOKS_DIR)
+sys.path.insert(0, ROOT)
 import no_guessed_proofs as guessed
 from isabelle_hooks.config import DEFAULTS, GuardDefaults
 from isabelle_hooks import discovery

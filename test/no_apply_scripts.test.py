@@ -7,15 +7,15 @@ explanation on stderr); it is driven here as a subprocess -- the real harness
 contract -- so the test sees the exact exit code the agent harness
 (Claude/Codex/OpenCode) acts on.
 
-Run directly: python3 no_apply_scripts.test.py
+Run directly: python3 test/no_apply_scripts.test.py
 """
 import os
 import unittest
 
 from hook_test_support import run_hook as run_hook_process, run_without_package, thy_write
 
-HOOKS_DIR = os.path.dirname(os.path.abspath(__file__))
-APPLY = os.path.join(HOOKS_DIR, "no_apply_scripts.py")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+APPLY = os.path.join(ROOT, "no_apply_scripts.py")
 
 
 def run_hook(payload):

@@ -7,7 +7,7 @@ reads the hook's stdin JSON and returns (check_text, transcript) where check_tex
 is the added theory text with comments/cartouches/strings stripped, or None when
 the call does not target a *.thy file.
 
-Run directly: python3 isabelle_hook_common.test.py
+Run directly: python3 test/isabelle_hook_common.test.py
 """
 import io
 import json
@@ -16,7 +16,8 @@ import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 import isabelle_hook_common as hook
 from isabelle_hooks import protocol
 
