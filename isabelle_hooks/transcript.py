@@ -9,20 +9,27 @@ from .protocol import (
     COMMAND_KEYS,
     CONTENT_KEYS,
     EXEC_SOURCE_KEYS,
+    NEW_KEYS,
+    OLD_KEYS,
+    PATH_KEYS,
     PROOF_SEARCH_QUERY_KEYS,
     RESULT_EVENT_TYPES,
+    THY_EXT,
     USE_EVENT_TYPES,
     is_edit_tool_name,
     is_evidence_invalidating_tool,
     is_exec_tool,
     is_open_file_tool,
     is_proof_search_wrapper_tool,
+    is_proof_state_query_tool,
     tool_name_ends_with,
 )
+from .edits import _first_str, _split_edit
+from .syntax import _strip
 
 
-TranscriptEvent = namedtuple("TranscriptEvent", "kind call_id name text mutates",
-                             defaults=(False,))
+TranscriptEvent = namedtuple("TranscriptEvent", "kind call_id name text mutates thy_text",
+                             defaults=(False, ""))
 
 # Transcript content-block schemas. VERIFIED for Claude (tool_use / tool_result, under
 # {"message":{"content":[...]}}). The Codex/OpenCode function-call variants below are a
@@ -115,6 +122,30 @@ def _mutates_open_file(name, raw):
     )
 
 
+def _added_thy_text(name, raw):
+    """The construct-stripped text a transcript edit call ADDS to a theory, or "".
+
+    This is how an *in-theory* proof search becomes visible: a PIDE-backed MCP has
+    no search tool, so the agent runs sledgehammer/try0 by writing the command into
+    the theory (via its `edit` tool) -- the trigger word then appears only in the
+    edit's added *.thy text, never in a command field. Only edit-tool payloads with
+    an explicit *.thy path are considered; a str-replace's unchanged anchor lines
+    are subtracted (removing a search command must not re-arm it) and the added
+    text is stripped of comments/cartouches/strings so prose can never arm it."""
+    if not isinstance(raw, dict) or not is_edit_tool_name(name):
+        return ""
+    path = _first_str(raw, PATH_KEYS)
+    if path is None or not path.strip().lower().endswith(THY_EXT):
+        return ""
+    new = _first_str(raw, NEW_KEYS)
+    if new is None:
+        new = _first_str(raw, CONTENT_KEYS)
+    if new is None:
+        return ""
+    old = _first_str(raw, OLD_KEYS) or ""
+    return _strip(_split_edit(old, new)[1])
+
+
 def _call_events(name, raw, call_id):
     """Normalize one transcript call, including nested functions.exec tools."""
     if is_exec_tool(name):
@@ -128,11 +159,13 @@ def _call_events(name, raw, call_id):
                     nested_name.lower(),
                     _call_text(nested_name, fields),
                     _mutates_open_file(nested_name, fields),
+                    _added_thy_text(nested_name.lower(), fields),
                 )
                 for nested_name, _argument, fields in nested
             ]
     return [TranscriptEvent(
-        "call", call_id, name, _call_text(name, raw), _mutates_open_file(name, raw))]
+        "call", call_id, name, _call_text(name, raw), _mutates_open_file(name, raw),
+        _added_thy_text(name, raw))]
 
 
 def _iter_blocks(obj):
@@ -199,13 +232,26 @@ _TAIL_MIN_LINES = 100
 
 
 def recent_method_evidence(path, window, method, triggers):
-    """Return unique current evidence that `method` was found, or None.
+    """Return the current evidence keys proving `method` was FOUND, oldest first.
 
     Within the recent window, one of the `triggers` (proof-search
     tools) ran AND the method being written appears in *that run's own result* -- i.e.
     this very method was actually *found*, not merely that some search ran (possibly on
     an unrelated goal) while the method's name happens to appear in some other,
-    unrelated result.
+    unrelated result. Each qualifying run yields one evidence key; the caller consumes
+    one key per written closer, so a single find can never authorize two closers.
+    Search runs are read-only, so evidence from several searches coexists (two finds
+    may authorize two closers in one write) until a completed proof/file-state-changing
+    call invalidates all of it.
+
+    A search may also run *in the theory itself*: a PIDE-backed MCP has no search
+    tool, so the agent inserts `sledgehammer`/`try0` into the *.thy via its edit tool
+    and reads the find back from a proof-state query (`get_state`). Such an edit whose
+    ADDED command text contains a trigger word arms an in-theory search; a later
+    query result naming the method is then its evidence, keyed to the arming edit
+    (repeated polls of the same find yield the same key, not fresh evidence). The
+    arming edit changes the file, so like any edit it first invalidates all earlier
+    evidence.
 
     The result must FOLLOW its trigger call and no later completed proof/file-state-
     changing call may intervene. Some harnesses append the edit currently undergoing
@@ -213,17 +259,17 @@ def recent_method_evidence(path, window, method, triggers):
     and has no result yet, it is omitted so it cannot invalidate itself or consume a
     recency-window slot. Harnesses that invoke the hook before appending the edit need
     no special handling. A completed first theory write remains in the transcript and
-    consumes the escape hatch before a later write, so evidence from an earlier goal
-    cannot authorize guesses indefinitely. Read-only calls may remain interleaved when
-    call IDs let us pair the hammer with its own result.
+    invalidates all prior evidence before a later write, so evidence from an earlier
+    goal cannot authorize guesses indefinitely. Read-only calls may remain interleaved
+    when call IDs let us pair the hammer with its own result.
 
     The window is the last `window` tool CALLS plus every event after the earliest of
-    them. Missing/unparseable transcripts and non-matching results yield None."""
+    them. Missing/unparseable transcripts and non-matching results yield []."""
     if not path or not os.path.exists(path):
-        return None
+        return []
     events = _read_events(path, max(window * _TAIL_LINES_PER_CALL, _TAIL_MIN_LINES))
     if not events:
-        return None
+        return []
     # Claude Code versions differ on whether the guarded tool_use is persisted before
     # or after PreToolUse runs. In the former ordering, the current edit is the final
     # call and cannot yet have a result. Drop only that in-flight edit. Earlier edits
@@ -234,10 +280,10 @@ def recent_method_evidence(path, window, method, triggers):
             and _is_edit_call(events[-1].name, events[-1].mutates)):
         events = events[:-1]
     if not events:
-        return None
+        return []
     call_positions = [i for i, e in enumerate(events) if e.kind == "call"]
     if not call_positions:
-        return None
+        return []
     start = call_positions[-window] if len(call_positions) >= window else 0
     recent = events[start:]
 
@@ -246,16 +292,26 @@ def recent_method_evidence(path, window, method, triggers):
     mrx = re.compile(r"\b" + re.escape(method.lower()) + r"\b")
     pending_by_id = {}
     pending_adjacent = False
-    found = None
+    in_theory = None   # (evidence key, epoch) of the latest armed in-theory search
+    query_calls = set()  # call ids of proof-state queries (results may carry finds)
+    found = {}         # insertion-ordered evidence keys, all still valid
     state_epoch = 0
     for event_index, e in enumerate(recent):
         if e.kind == "call":
             is_hammer = _is_hammer(e.name, e.text, triggers, trigger_rxs)
-            if is_hammer:
-                found = None  # a newer search supersedes an older result
-            elif _invalidates_search_evidence(e.name, e.text, is_hammer, e.mutates):
+            arms_in_theory = bool(
+                not is_hammer and e.thy_text
+                and any(rx.search(e.thy_text.lower()) for rx in trigger_rxs))
+            if (not is_hammer
+                    and _invalidates_search_evidence(e.name, e.text, is_hammer, e.mutates)):
                 state_epoch += 1
-                found = None
+                found.clear()
+            if arms_in_theory:
+                key = (("id", str(e.call_id)) if e.call_id
+                       else ("event", str(start + event_index)))
+                in_theory = (key, state_epoch)
+            if is_proof_state_query_tool(e.name) and e.call_id:
+                query_calls.add(e.call_id)
             if e.call_id:
                 if is_hammer:
                     pending_by_id[e.call_id] = state_epoch
@@ -267,14 +323,17 @@ def recent_method_evidence(path, window, method, triggers):
                 if e.call_id in pending_by_id:
                     search_epoch = pending_by_id.pop(e.call_id)
                     if search_epoch == state_epoch and mrx.search(e.text):
-                        found = ("id", str(e.call_id))
+                        found[("id", str(e.call_id))] = None
+                elif (in_theory is not None and in_theory[1] == state_epoch
+                        and e.call_id in query_calls and mrx.search(e.text)):
+                    found[in_theory[0]] = None
             else:
                 if pending_adjacent and mrx.search(e.text):
-                    found = ("event", str(start + event_index))
+                    found[("event", str(start + event_index))] = None
                 pending_adjacent = False
-    return found
+    return list(found)
 
 
 def method_found_recently(path, window, method, triggers):
     """Compatibility boolean view used by tests and manual transcript diagnostics."""
-    return recent_method_evidence(path, window, method, triggers) is not None
+    return bool(recent_method_evidence(path, window, method, triggers))

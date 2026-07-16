@@ -866,6 +866,166 @@ class NoGuessedProofs(unittest.TestCase):
         self.assertIn("Fix: poke the oracle.", err)
         self.assertNotIn("repl_sledgehammer", err)
 
+    def test_pide_in_theory_search_get_state_find_unlocks(self):
+        # A PIDE-style MCP has no search tool: sledgehammer runs by being inserted
+        # into the theory via `edit`, and its find is read back from `get_state`.
+        # That pair must count as evidence, or the hatch is dead on such servers.
+        path = transcript_blocks(
+            use("mcp__isabelle-pide-mcp__edit",
+                {"origin": "Scratch.thy", "text": "sledgehammer", "mode": "append"},
+                call_id="e1"),
+            result("ok", call_id="e1"),
+            use("mcp__isabelle-pide-mcp__get_state", {"origin": "Scratch.thy"},
+                call_id="q1"),
+            result("sledgehammer: Try this: by (metis foo)", call_id="q1"),
+        )
+        try:
+            payload = thy_write("lemma x by (metis foo)")
+            payload["transcript_path"] = path
+            code, err = run_hook(payload, ["--window", "20"])
+            self.assertEqual(code, 0, err)
+        finally:
+            os.remove(path)
+
+    def test_get_state_find_without_in_theory_search_still_blocks(self):
+        # A get_state result mentioning the method is not evidence by itself: without
+        # an arming in-theory search the output is just file state, not a find.
+        path = transcript_blocks(
+            use("mcp__isabelle-pide-mcp__get_state", {"origin": "Scratch.thy"},
+                call_id="q1"),
+            result("lemma foo ... by metis ...", call_id="q1"),
+        )
+        try:
+            payload = thy_write("lemma x by metis")
+            payload["transcript_path"] = path
+            code, _ = run_hook(payload, ["--window", "20"])
+            self.assertEqual(code, 2)
+        finally:
+            os.remove(path)
+
+    def test_in_theory_search_inside_comment_does_not_arm(self):
+        # `sledgehammer` written inside a comment is prose, not a run -- a later
+        # get_state result naming the method must not unlock.
+        path = transcript_blocks(
+            use("mcp__isabelle-pide-mcp__edit",
+                {"origin": "Scratch.thy", "text": "(* sledgehammer next *)"},
+                call_id="e1"),
+            result("ok", call_id="e1"),
+            use("mcp__isabelle-pide-mcp__get_state", {"origin": "Scratch.thy"},
+                call_id="q1"),
+            result("... by metis ...", call_id="q1"),
+        )
+        try:
+            payload = thy_write("lemma x by metis")
+            payload["transcript_path"] = path
+            code, _ = run_hook(payload, ["--window", "20"])
+            self.assertEqual(code, 2)
+        finally:
+            os.remove(path)
+
+    def test_edit_after_in_theory_search_invalidates_its_find(self):
+        # Another completed edit between the in-theory search and the query result
+        # moved the file state, so the find no longer describes it.
+        path = transcript_blocks(
+            use("mcp__isabelle-pide-mcp__edit",
+                {"origin": "Scratch.thy", "text": "sledgehammer"}, call_id="e1"),
+            result("ok", call_id="e1"),
+            use("mcp__isabelle-pide-mcp__edit",
+                {"origin": "Scratch.thy", "text": "definition d where d = x"},
+                call_id="e2"),
+            result("ok", call_id="e2"),
+            use("mcp__isabelle-pide-mcp__get_state", {"origin": "Scratch.thy"},
+                call_id="q1"),
+            result("Try this: by (metis foo)", call_id="q1"),
+        )
+        try:
+            payload = thy_write("lemma x by (metis foo)")
+            payload["transcript_path"] = path
+            code, _ = run_hook(payload, ["--window", "20"])
+            self.assertEqual(code, 2)
+        finally:
+            os.remove(path)
+
+    def test_removing_in_theory_search_command_does_not_rearm(self):
+        # The cleanup str-replace that DELETES the inserted `sledgehammer` reproduces
+        # it only in old_text; the changed text is the replacement. It must not arm a
+        # fresh search, or every cleanup would mint evidence from stale state output.
+        path = transcript_blocks(
+            use("mcp__isabelle-pide-mcp__edit",
+                {"origin": "Scratch.thy", "old_text": "sledgehammer\nqed",
+                 "text": "qed"},
+                call_id="e1"),
+            result("ok", call_id="e1"),
+            use("mcp__isabelle-pide-mcp__get_state", {"origin": "Scratch.thy"},
+                call_id="q1"),
+            result("... by metis ...", call_id="q1"),
+        )
+        try:
+            payload = thy_write("lemma x by metis")
+            payload["transcript_path"] = path
+            code, _ = run_hook(payload, ["--window", "20"])
+            self.assertEqual(code, 2)
+        finally:
+            os.remove(path)
+
+    def test_repeated_get_state_polls_are_one_find_not_two(self):
+        # Polling the same in-theory find twice must not mint two evidence keys:
+        # one search authorizes one closer, however often its output is re-read.
+        path = transcript_blocks(
+            use("mcp__isabelle-pide-mcp__edit",
+                {"origin": "Scratch.thy", "text": "sledgehammer"}, call_id="e1"),
+            result("ok", call_id="e1"),
+            use("mcp__isabelle-pide-mcp__get_state", {"origin": "Scratch.thy"},
+                call_id="q1"),
+            result("Try this: by (metis foo)", call_id="q1"),
+            use("mcp__isabelle-pide-mcp__get_state", {"origin": "Scratch.thy"},
+                call_id="q2"),
+            result("Try this: by (metis foo)", call_id="q2"),
+        )
+        try:
+            payload = thy_write(
+                "lemma a: A by (metis foo)\nlemma b: B by (metis foo)")
+            payload["transcript_path"] = path
+            code, _ = run_hook(payload, ["--window", "20"])
+            self.assertEqual(code, 2)
+        finally:
+            os.remove(path)
+
+    def test_second_search_does_not_invalidate_first_find(self):
+        # Searches are read-only: a later sledgehammer run (even a failed one) must
+        # not erase evidence for a method an earlier run genuinely found.
+        path = transcript_blocks(
+            use("repl_sledgehammer", call_id="s1"),
+            result("Try this: by (metis foo)", call_id="s1"),
+            use("repl_sledgehammer", call_id="s2"),
+            result("No proof found.", call_id="s2"),
+        )
+        try:
+            payload = thy_write("lemma x by (metis foo)")
+            payload["transcript_path"] = path
+            code, err = run_hook(payload, ["--window", "20"])
+            self.assertEqual(code, 0, err)
+        finally:
+            os.remove(path)
+
+    def test_two_searches_authorize_two_closers_in_one_write(self):
+        # Two finds from two searches coexist, so one write may add both closers --
+        # while a single find still cannot authorize two closers (see
+        # test_one_search_result_cannot_authorize_two_closers_in_one_write).
+        path = transcript_blocks(
+            use("repl_sledgehammer", call_id="s1"),
+            result("Try this: by (metis foo)", call_id="s1"),
+            use("repl_sledgehammer", call_id="s2"),
+            result("Try this: by auto", call_id="s2"),
+        )
+        try:
+            payload = thy_write("lemma a: A by (metis foo)\nlemma b: B by auto")
+            payload["transcript_path"] = path
+            code, err = run_hook(payload, ["--window", "20"])
+            self.assertEqual(code, 0, err)
+        finally:
+            os.remove(path)
+
     def test_method_in_later_unrelated_result_still_blocks(self):
         # The hammer's OWN result found nothing; a later, unrelated result (e.g. a Read
         # of another theory) merely mentions the method. That must not rescue the guess

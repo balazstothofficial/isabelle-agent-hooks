@@ -40,6 +40,11 @@ PROOF_SEARCH_QUERY_KEYS = ("query",)
 EDIT_TOOL_NAMES = (
     "write", "edit", *PATCH_TOOL_NAMES, MULTI_EDIT_TOOL.lower(), *MCP_WRITE_TOOL_NAMES)
 PROOF_STATE_TOOL_NAMES = ("repl_step", "repl_undo", "repl_reset", "repl_load")
+# Read-only queries whose RESULTS carry prover output. A PIDE-style MCP has no search
+# tool: sledgehammer/try0 run by being written into the theory, and their finds are
+# read back from one of these calls -- so their results may serve as the paired result
+# of an in-theory search (see transcript.recent_method_evidence).
+PROOF_STATE_QUERY_TOOL_NAMES = ("get_state",)
 
 
 def tool_name_matches(name, alias):
@@ -91,6 +96,10 @@ def is_proof_search_wrapper_tool(name):
 
 def is_edit_tool_name(name):
     return name.lower() == BASH_TOOL.lower() or _matches_any(name, EDIT_TOOL_NAMES)
+
+
+def is_proof_state_query_tool(name):
+    return _matches_any(name, PROOF_STATE_QUERY_TOOL_NAMES)
 
 
 def is_evidence_invalidating_tool(name):

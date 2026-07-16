@@ -7,7 +7,11 @@ separate hook, no_apply_scripts.py.)
 
 Blocks a write when ADDED text introduces a method that the pinned Isabelle reports
 as discoverable by try0/sledgehammer, unless that method was reported by a recent
-search result. Package/structural methods absent from that registry may be written
+search result. Searches are recognised as dedicated tool calls (repl_sledgehammer),
+trigger words in proof-command fields (repl_step "try0", a Bash command), or -- for
+PIDE-style MCPs without a search tool -- a theory edit that inserts the search
+command, paired with a later get_state result carrying the find.
+Package/structural methods absent from that registry may be written
 directly. If discovery is unavailable, `--allow` supplies the conservative legacy
 fallback policy.
 A compound closer is fully covered: `by unfold_locales auto` is blocked on `auto`
@@ -156,8 +160,14 @@ def main():
             hit.name not in cfg.allowed)
         if not requires_found:
             continue
-        evidence = recent_method_evidence(transcript, cfg.window, hit.name, cfg.found_via)
-        if evidence is None or evidence in used_evidence:
+        # One evidence key per written closer: several coexisting finds can authorize
+        # several closers in one write, but a single find never authorizes two.
+        evidence = next(
+            (key for key in recent_method_evidence(
+                transcript, cfg.window, hit.name, cfg.found_via)
+             if key not in used_evidence),
+            None)
+        if evidence is None:
             blocked = fragment, scan_text, hit
             break
         used_evidence.add(evidence)

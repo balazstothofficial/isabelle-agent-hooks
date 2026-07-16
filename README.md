@@ -13,6 +13,23 @@ the agent, and coding-agent hook and transcript interfaces may change over time.
 Both AutoCorrode's I/Q MCP server and `isabelle-pide-mcp` are supported, alongside
 the coding agents' standard file read/write/edit tools.
 
+## Search evidence
+
+`no_guessed_proofs` accepts a search-discoverable `by` method only when the recent
+transcript shows it was *found*: a proof-search run whose own result names the method.
+A run is recognised as
+
+- a dedicated search tool call (a tool name ending in `sledgehammer`/`try0`, or an
+  `explore` query naming one);
+- a trigger word in a proof-command field (`repl_step "try0"`, a Bash command); or
+- an *in-theory* search for PIDE-style MCPs without a search tool: a theory edit whose
+  added command text contains the trigger, paired with a later `get_state` result
+  carrying the find.
+
+Each find is one piece of evidence and authorizes one written closer. Searches are
+read-only, so finds from several searches coexist; any completed edit, shell command,
+or proof-state-changing call invalidates all outstanding evidence.
+
 ## Hook contract
 
 Each Python entry point reads one JSON object from standard input:
