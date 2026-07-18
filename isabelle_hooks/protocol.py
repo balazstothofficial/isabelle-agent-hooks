@@ -24,10 +24,6 @@ EXEC_TOOL_NAMES = ("functions.exec", "functions_exec")
 EXEC_COMMAND_TOOL_NAMES = ("exec_command",)
 EXEC_SOURCE_KEYS = ("code", "source", "text")
 EXEC_COMMAND_FIELD = "cmd"
-# Compatibility names retained by isabelle_hook_common's historical import surface.
-PATCH_TOOL_SUBSTR = PATCH_TOOL_NAMES[0]
-MCP_WRITE_SUBSTRS = MCP_WRITE_TOOL_NAMES
-
 # Transcript content-block schemas and command-bearing input fields.
 USE_EVENT_TYPES = ("tool_use", "function_call", "tool_call")
 RESULT_EVENT_TYPES = (

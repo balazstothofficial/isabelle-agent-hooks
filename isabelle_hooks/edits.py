@@ -32,6 +32,7 @@ session-qualified theory name such as HOL.Nat is not a *.thy path, so it is not
 recognised).
 """
 import sys, json, re, difflib
+from functools import lru_cache
 
 from .models import EditFragment
 from .mutations import PatchMutation, ReplacementMutation, VirtualFileStore
@@ -211,8 +212,12 @@ def _parse_apply_patch(blob):
         if path is None or not path.lower().endswith(THY_EXT) or not hunk_lines:
             hunk_lines = []
             return
-        post, added, ranges, offset = [], [], [], 0
+        before, post, added, ranges, offset = [], [], [], [], 0
         for kind, body in hunk_lines:
+            if kind != "+":
+                if before:
+                    before.append("\n")
+                before.append(body)
             if kind == "-":
                 continue
             if post:
@@ -226,7 +231,8 @@ def _parse_apply_patch(blob):
                 ranges.append((start, offset))
         if added:
             sections.append(PatchMutation(
-                path, "\n".join(added), "".join(post), tuple(ranges)))
+                path, "\n".join(added), "".join(before), "".join(post),
+                tuple(ranges)))
         hunk_lines = []
 
     def flush_file():
@@ -270,21 +276,30 @@ def _read_path(paths):
     return None, None
 
 
+@lru_cache(maxsize=32)
+def _strip_cached(source):
+    """Share full-snapshot lexical work across policies and changed fragments."""
+    return _strip(source)
+
+
 def _stripped_ranges(source, raw_ranges):
     """Translate raw source ranges to offsets in the construct-stripped source."""
     return [
-        (len(_strip(source[:start])), len(_strip(source[:end])))
+        (len(_strip_cached(source[:start])), len(_strip_cached(source[:end])))
         for start, end in raw_ranges
     ]
 
 
-def _with_context(fragment, context_source, raw_ranges, context_line=1):
+def _with_context(fragment, context_source, raw_ranges, context_line=1,
+                  before_source=None, after_source=None):
     """Attach post-edit parsing context and changed spans to an added fragment."""
     return fragment._replace(
-        context_text=_strip(context_source),
+        context_text=_strip_cached(context_source),
         context_source=context_source,
         context_line=context_line,
         changed_ranges=_stripped_ranges(context_source, raw_ranges),
+        before_source=before_source,
+        after_source=after_source,
     )
 
 
@@ -307,7 +322,8 @@ def _full_write_fragments(path, old, new):
         seed = _strip_scan(prefix)[1]
         fragment = EditFragment(path, _strip_scan(source, seed)[0], source, j1 + 1)
         fragments.append(_with_context(
-            fragment, new, [(offsets[j1], offsets[j2])], context_line=1))
+            fragment, new, [(offsets[j1], offsets[j2])], context_line=1,
+            before_source=old, after_source=new))
     return fragments
 
 
@@ -358,7 +374,8 @@ def _replacement_fragments(paths, old, new, replace_all=False, snapshots=None):
             post = content[:idx] + new_c + content[idx + len(old_c):]
             start = idx + changed_in_new
             fragments.append(_with_context(
-                fragment, post, [(start, start + len(changed_c))], context_line=1))
+                fragment, post, [(start, start + len(changed_c))], context_line=1,
+                before_source=content, after_source=post))
         else:
             fragments.append(fragment)
     return fragments
@@ -379,12 +396,36 @@ def extract_thy_edits():
     return _extract_thy_edits_data(data)
 
 
+def _attach_snapshot_pairs(fragments, snapshots):
+    changes = snapshots.changes()
+    if not changes:
+        return fragments
+    by_key = {
+        VirtualFileStore._key(path): pair for path, pair in changes.items()
+    }
+    return [
+        fragment._replace(before_source=pair[0], after_source=pair[1])
+        if fragment.path and (pair := by_key.get(
+            VirtualFileStore._key(fragment.path))) is not None
+        else fragment
+        for fragment in fragments
+    ]
+
+
 def _extract_thy_edits_data(data, snapshots=None):
+    """Analyze one hook request, attaching one original/final snapshot per path."""
+    owns_snapshots = snapshots is None
+    if owns_snapshots:
+        snapshots = VirtualFileStore(_read_path)
+    fragments, transcript = _extract_thy_edits_data_impl(data, snapshots)
+    if owns_snapshots and fragments:
+        fragments = _attach_snapshot_pairs(fragments, snapshots)
+    return fragments, transcript
+
+
+def _extract_thy_edits_data_impl(data, snapshots):
     if not isinstance(data, dict):
         return None, ""
-
-    if snapshots is None:
-        snapshots = VirtualFileStore(_read_path)
 
     tool = data.get("tool_name", "") or ""
     ti = data.get("tool_input", {}) or {}
@@ -433,10 +474,28 @@ def _extract_thy_edits_data(data, snapshots=None):
                     mutation.context_text,
                     mutation.changed_ranges,
                     context_line=1,
+                    before_source=mutation.before_text,
+                    after_source=mutation.context_text,
                 )
                 for mutation in sections
                 if mutation.added_text.strip()
             ]
+            # Reconstruct full snapshots when every hunk has a unique exact anchor.
+            # This supplies relocation analysis with the same before/after view as
+            # Write/Edit without weakening ordinary patch checking when reconstruction
+            # is impossible.
+            for mutation in sections:
+                current_path, current = snapshots.read((mutation.path,))
+                if current is None:
+                    if not mutation.before_text:
+                        snapshots.write(mutation.path, mutation.context_text)
+                    continue
+                occurrences = current.count(mutation.before_text)
+                if mutation.before_text and occurrences == 1:
+                    snapshots.write(
+                        current_path,
+                        current.replace(mutation.before_text, mutation.context_text, 1),
+                    )
             return (fragments or None), transcript
         if is_patch_tool(tool):
             # A genuine apply_patch that touches no theory file -> nothing to check.
@@ -530,11 +589,3 @@ def _extract_thy_edits_data(data, snapshots=None):
             return None, transcript
 
     return fragments, transcript
-
-
-def extract_thy_edit():
-    """Compatibility facade returning the formerly exposed joined check text."""
-    fragments, transcript = extract_thy_edits()
-    if fragments is None:
-        return None, transcript
-    return "\n".join(fragment.text for fragment in fragments), transcript

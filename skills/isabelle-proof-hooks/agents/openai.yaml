@@ -1,0 +1,4 @@
+interface:
+  display_name: "Isabelle Proof Hooks"
+  short_description: "Work efficiently with Isabelle proof guards"
+  default_prompt: "Use $isabelle-proof-hooks to make this Isabelle edit comply with the proof-discipline guards."

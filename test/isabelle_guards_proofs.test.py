@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for the no_guessed_proofs.py PreToolUse guard.
+"""Unit tests for the guessed-proof policy in the combined guard.
 
 The guard blocks a search-discoverable `by <method>` UNLESS a current
 sledgehammer/try0 (within --window) proves it was found rather than guessed. It
@@ -8,7 +8,7 @@ driven here as a subprocess -- the real harness contract -- so the test sees the
 exact exit code the agent harness (Claude/Codex/OpenCode) acts on. parse_config
 is tested in-process.
 
-Run directly: python3 test/no_guessed_proofs.test.py
+Run directly: python3 test/isabelle_guards_proofs.test.py
 """
 import json
 import os
@@ -22,21 +22,24 @@ from unittest import mock
 from hook_test_support import run_hook as run_hook_process, run_without_package, thy_write
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-GUESSED = os.path.join(ROOT, "no_guessed_proofs.py")
+GUARD = os.path.join(ROOT, "isabelle_guards.py")
 
 sys.path.insert(0, ROOT)
-import no_guessed_proofs as guessed
+from isabelle_hooks import guard as guessed
 from isabelle_hooks.config import DEFAULTS, GuardDefaults
 from isabelle_hooks import discovery
+from isabelle_hooks.relocations import proof_units
 
 
 def run_hook(payload, args=()):
     args = list(args)
+    if "--policies" not in args:
+        args.extend(["--policies", "guessed-proof"])
     if "--isabelle-command" not in args and "--searchable" not in args:
         # Policy tests which exercise discovery fallback must not depend on whether
         # the developer machine happens to have Isabelle on PATH.
         args.extend(["--isabelle-command", "/definitely/missing/isabelle"])
-    return run_hook_process(GUESSED, payload, args)
+    return run_hook_process(GUARD, payload, args)
 
 
 def exec_call(source, transcript_path=None):
@@ -103,8 +106,8 @@ def transcript_blocks(*blocks, envelope=True):
 
 class ParseConfig(unittest.TestCase):
     def test_defaults_have_one_immutable_owner(self):
-        self.assertEqual(guessed.DEFAULT_WINDOW, DEFAULTS.window)
-        self.assertEqual(guessed.DEFAULT_FOUND_VIA, DEFAULTS.found_via)
+        self.assertEqual(guessed.default_config().window, DEFAULTS.window)
+        self.assertEqual(guessed.default_config().found_via, DEFAULTS.found_via)
         with self.assertRaises(FrozenInstanceError):
             DEFAULTS.window = 99
         self.assertEqual(
@@ -112,44 +115,49 @@ class ParseConfig(unittest.TestCase):
 
     def test_defaults(self):
         cfg = guessed.parse_config([])
-        self.assertEqual(cfg.window, guessed.DEFAULT_WINDOW)
-        self.assertEqual(cfg.allowed, set())
-        self.assertEqual(cfg.found_via, list(guessed.DEFAULT_FOUND_VIA))
+        self.assertEqual(cfg.policies, frozenset(guessed.POLICIES))
+        self.assertEqual(cfg.window, DEFAULTS.window)
+        self.assertEqual(cfg.allowed, frozenset())
+        self.assertEqual(cfg.found_via, DEFAULTS.found_via)
         self.assertEqual(
             cfg.isabelle_command,
             os.environ.get("ISABELLE_HOOKS_ISABELLE", "isabelle"),
         )
         self.assertIsNone(cfg.remediation)
 
+    def test_single_policy_selection(self):
+        cfg = guessed.parse_config(["--policies", "guessed-proof"])
+        self.assertEqual(cfg.policies, frozenset({"guessed-proof"}))
+
     def test_window_and_allow(self):
         cfg = guessed.parse_config(["--window", "5", "--allow", "auto", "simp"])
         self.assertEqual(cfg.window, 5)
-        self.assertEqual(cfg.allowed, {"auto", "simp"})
+        self.assertEqual(cfg.allowed, frozenset({"auto", "simp"}))
 
     def test_bad_window_falls_back(self):
         cfg = guessed.parse_config(["--window", "notanint"])
-        self.assertEqual(cfg.window, guessed.DEFAULT_WINDOW)
+        self.assertEqual(cfg.window, DEFAULTS.window)
 
     def test_nonpositive_window_falls_back(self):
         for value in ("0", "-2"):
             with self.subTest(value=value):
                 cfg = guessed.parse_config(["--window", value])
-                self.assertEqual(cfg.window, guessed.DEFAULT_WINDOW)
+                self.assertEqual(cfg.window, DEFAULTS.window)
 
     def test_unknown_args_ignored(self):
         cfg = guessed.parse_config(["--bogus", "x", "--allow", "blast"])
-        self.assertEqual(cfg.allowed, {"blast"})
+        self.assertEqual(cfg.allowed, frozenset({"blast"}))
 
     def test_found_via_parsed(self):
         cfg = guessed.parse_config(["--found-via", "sledgehammer", "try0", "--allow", "auto"])
-        self.assertEqual(cfg.found_via, ["sledgehammer", "try0"])
-        self.assertEqual(cfg.allowed, {"auto"})
+        self.assertEqual(cfg.found_via, ("sledgehammer", "try0"))
+        self.assertEqual(cfg.allowed, frozenset({"auto"}))
 
     def test_found_via_empty_falls_back_to_default(self):
         # An explicit but empty --found-via (nothing before the next flag) must not
         # leave the escape hatch dead; it falls back to the built-in default.
         cfg = guessed.parse_config(["--found-via", "--window", "7"])
-        self.assertEqual(cfg.found_via, list(guessed.DEFAULT_FOUND_VIA))
+        self.assertEqual(cfg.found_via, DEFAULTS.found_via)
         self.assertEqual(cfg.window, 7)
 
     def test_remediation_is_single_value(self):
@@ -164,6 +172,40 @@ class ParseConfig(unittest.TestCase):
 
 
 class MethodDiscovery(unittest.TestCase):
+    def test_prepared_registry_load_does_not_launch_isabelle(self):
+        with tempfile.TemporaryDirectory() as cache, \
+             mock.patch.object(discovery, "_cache_root", return_value=cache), \
+             mock.patch.object(discovery, "_fast_identity", return_value="fast"):
+            path = discovery._active_cache_path("isabelle_dev")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "version": discovery.QUERY_VERSION,
+                    "command": "isabelle_dev",
+                    "fast_identity": "fast",
+                    "methods": ["auto", "metis"],
+                }, f)
+            with mock.patch.object(discovery.subprocess, "run",
+                                   side_effect=AssertionError("hot path launched Isabelle")):
+                methods, warning = discovery.load_searchable_methods("isabelle_dev")
+            self.assertEqual(methods, {"auto", "metis"})
+            self.assertIsNone(warning)
+
+    def test_malformed_prepared_registry_uses_conservative_fallback(self):
+        with tempfile.TemporaryDirectory() as cache, \
+             mock.patch.object(discovery, "_cache_root", return_value=cache), \
+             mock.patch.object(discovery, "_fast_identity", return_value="fast"):
+            path = discovery._active_cache_path("isabelle_dev")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "version": discovery.QUERY_VERSION,
+                    "command": "isabelle_dev",
+                    "fast_identity": "fast",
+                    "methods": [1],
+                }, f)
+            methods, warning = discovery.load_searchable_methods("isabelle_dev")
+        self.assertIsNone(methods)
+        self.assertIn("invalid method registry", warning)
+
     def test_success_is_cached_and_reused(self):
         with tempfile.TemporaryDirectory() as cache:
             with mock.patch.object(discovery, "_cache_root", return_value=cache), \
@@ -171,8 +213,8 @@ class MethodDiscovery(unittest.TestCase):
                                    return_value=("/isabelle", "stable", "fingerprint")), \
                  mock.patch.object(discovery, "_run_discovery",
                                    return_value={"auto", "metis"}) as run:
-                first, warning1 = guessed.discover_searchable_methods("isabelle_dev")
-                second, warning2 = guessed.discover_searchable_methods("isabelle_dev")
+                first, warning1 = discovery.discover_searchable_methods("isabelle_dev")
+                second, warning2 = discovery.discover_searchable_methods("isabelle_dev")
             self.assertEqual(first, {"auto", "metis"})
             self.assertEqual(second, first)
             self.assertIsNone(warning1)
@@ -187,8 +229,8 @@ class MethodDiscovery(unittest.TestCase):
                  mock.patch.object(discovery, "_discover_identity", side_effect=identities), \
                  mock.patch.object(discovery, "_run_discovery",
                                    side_effect=[{"auto"}, {"auto", "smt"}]) as run:
-                first, _ = guessed.discover_searchable_methods("isabelle_dev")
-                second, _ = guessed.discover_searchable_methods("isabelle_dev")
+                first, _ = discovery.discover_searchable_methods("isabelle_dev")
+                second, _ = discovery.discover_searchable_methods("isabelle_dev")
             self.assertEqual(first, {"auto"})
             self.assertEqual(second, {"auto", "smt"})
             self.assertEqual(run.call_count, 2)
@@ -202,7 +244,7 @@ class MethodDiscovery(unittest.TestCase):
                                    return_value=("/isabelle", "stable", "new")), \
                  mock.patch.object(discovery, "_run_discovery",
                                    side_effect=RuntimeError("boom")):
-                methods, warning = guessed.discover_searchable_methods("isabelle_dev")
+                methods, warning = discovery.discover_searchable_methods("isabelle_dev")
             self.assertEqual(methods, {"auto", "metis"})
             self.assertIn("previous cache", warning)
 
@@ -213,20 +255,20 @@ class MethodDiscovery(unittest.TestCase):
                                    return_value=("/isabelle", "stable", "new")), \
                  mock.patch.object(discovery, "_run_discovery",
                                    side_effect=RuntimeError("boom")):
-                methods, warning = guessed.discover_searchable_methods("isabelle_dev")
+                methods, warning = discovery.discover_searchable_methods("isabelle_dev")
             self.assertIsNone(methods)
             self.assertIn("no cache", warning)
 
     def test_malformed_discovery_output_is_rejected(self):
         completed = subprocess.CompletedProcess([], 0, "Finished Draft", "")
-        with mock.patch.object(guessed.subprocess, "run", return_value=completed):
+        with mock.patch.object(discovery.subprocess, "run", return_value=completed):
             with self.assertRaises(RuntimeError):
-                guessed._run_discovery("isabelle_dev")
+                discovery._run_discovery("isabelle_dev")
 
 
 class NoGuessedProofs(unittest.TestCase):
     def test_missing_shared_package_fails_open_cleanly(self):
-        code, err = run_without_package(GUESSED, thy_write("lemma x by auto"))
+        code, err = run_without_package(GUARD, thy_write("lemma x by auto"))
         self.assertEqual(code, 0, err)
         self.assertIn("shared helper unavailable", err)
         self.assertNotIn("Traceback", err)
@@ -281,6 +323,199 @@ class NoGuessedProofs(unittest.TestCase):
                    "tool_input": {"file_path": "notes.md", "content": "by auto"}}
         code, _ = run_hook(payload)
         self.assertEqual(code, 0)
+
+    def test_atomic_reordering_of_existing_proof_units_is_allowed(self):
+        old = ("theory T imports Main begin\n"
+               "lemma a: True by auto\n"
+               "lemma b: True by metis\nend\n")
+        new = ("theory T imports Main begin\n"
+               "lemma b: True by metis\n"
+               "lemma a: True by auto\nend\n")
+        fd, path = tempfile.mkstemp(suffix=".thy")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(old)
+        try:
+            payload = {"tool_name": "Write", "tool_input": {
+                "file_path": path, "content": new}}
+            code, err = run_hook(payload, ["--searchable", "auto", "metis"])
+            self.assertEqual(code, 0, err)
+        finally:
+            os.remove(path)
+
+    def test_move_between_multiline_contexts_requires_evidence(self):
+        old = ("theory T imports Main\n"
+               "begin\n"
+               "context A\n"
+               "begin\n"
+               "lemma x: True by auto\n"
+               "end\n"
+               "context B\n"
+               "begin\n"
+               "end\n"
+               "end\n")
+        new = ("theory T imports Main\n"
+               "begin\n"
+               "context A\n"
+               "begin\n"
+               "end\n"
+               "context B\n"
+               "begin\n"
+               "lemma x: True by auto\n"
+               "end\n"
+               "end\n")
+        fd, path = tempfile.mkstemp(suffix=".thy")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(old)
+        try:
+            payload = {"tool_name": "Write", "tool_input": {
+                "file_path": path, "content": new}}
+            code, err = run_hook(payload, ["--searchable", "auto"])
+            self.assertEqual(code, 2, err)
+        finally:
+            os.remove(path)
+
+    def test_atomic_patch_reordering_of_existing_proof_units_is_allowed(self):
+        old = ("theory T imports Main begin\n"
+               "lemma a: True by auto\n"
+               "lemma b: True by metis\nend")
+        fd, path = tempfile.mkstemp(suffix=".thy")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(old)
+        try:
+            payload = {"tool_name": "apply_patch", "tool_input": {"input": (
+                "*** Begin Patch\n*** Update File: " + path + "\n@@\n"
+                " theory T imports Main begin\n"
+                "-lemma a: True by auto\n"
+                "-lemma b: True by metis\n"
+                "+lemma b: True by metis\n"
+                "+lemma a: True by auto\n"
+                " end\n*** End Patch\n"
+            )}}
+            code, err = run_hook(payload, ["--searchable", "auto", "metis"])
+            self.assertEqual(code, 0, err)
+        finally:
+            os.remove(path)
+
+    def test_copying_existing_proof_unit_still_requires_evidence(self):
+        old = "theory T imports Main begin\nlemma a: True by auto\nend\n"
+        new = old.replace("end\n", "lemma a: True by auto\nend\n")
+        fd, path = tempfile.mkstemp(suffix=".thy")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(old)
+        try:
+            payload = {"tool_name": "Write", "tool_input": {
+                "file_path": path, "content": new}}
+            code, err = run_hook(payload, ["--searchable", "auto"])
+            self.assertEqual(code, 2, err)
+        finally:
+            os.remove(path)
+
+    def test_same_closer_moved_to_different_statement_still_blocks(self):
+        old = "theory T imports Main begin\nlemma a: True by auto\nend\n"
+        new = "theory T imports Main begin\nlemma b: False by auto\nend\n"
+        fd, path = tempfile.mkstemp(suffix=".thy")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(old)
+        try:
+            payload = {"tool_name": "Write", "tool_input": {
+                "file_path": path, "content": new}}
+            code, err = run_hook(payload, ["--searchable", "auto"])
+            self.assertEqual(code, 2, err)
+        finally:
+            os.remove(path)
+
+    def test_goal_bound_search_evidence_matches_candidate(self):
+        goal = proof_units("lemma x: True by auto")[0].structural_goal
+        marker = "ISABELLE_HOOK_EVIDENCE " + json.dumps({
+            "method": "auto", "goal": goal})
+        path = transcript_blocks(
+            use("repl_sledgehammer", call_id="search"),
+            result("Try this: by auto\n" + marker, call_id="search"),
+        )
+        try:
+            payload = thy_write("lemma x: True by auto")
+            payload["transcript_path"] = path
+            code, err = run_hook(payload, ["--searchable", "auto"])
+            self.assertEqual(code, 0, err)
+        finally:
+            os.remove(path)
+
+    def test_goal_bound_search_evidence_for_other_goal_blocks(self):
+        marker = "ISABELLE_HOOK_EVIDENCE " + json.dumps({
+            "method": "auto", "goal": "different-goal"})
+        path = transcript_blocks(
+            use("repl_sledgehammer", call_id="search"),
+            result("Try this: by auto\n" + marker, call_id="search"),
+        )
+        try:
+            payload = thy_write("lemma x: True by auto")
+            payload["transcript_path"] = path
+            code, err = run_hook(payload, ["--searchable", "auto"])
+            self.assertEqual(code, 2, err)
+            self.assertIn("different goal", err)
+        finally:
+            os.remove(path)
+
+    def test_goal_bound_evidence_preserves_fingerprint_case(self):
+        marker = "ISABELLE_HOOK_EVIDENCE " + json.dumps({
+            "method": "auto", "goal": "CaseSensitiveFingerprint"})
+        transcript = transcript_blocks(
+            use("repl_sledgehammer", call_id="search"),
+            result("Try this: by AUTO\n" + marker, call_id="search"),
+        )
+        fd, theory = tempfile.mkstemp(suffix=".thy")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("")
+        provider_fd, provider = tempfile.mkstemp(suffix=".py")
+        with os.fdopen(provider_fd, "w", encoding="utf-8") as f:
+            f.write(
+                "import json, sys\n"
+                "request = json.load(sys.stdin)\n"
+                "print(json.dumps({\"before\": [\"CaseSensitiveFingerprint\"] * "
+                "len(request[\"before\"][\"units\"]), \"after\": "
+                "[\"CaseSensitiveFingerprint\"] * "
+                "len(request[\"after\"][\"units\"])}))\n")
+        try:
+            payload = {"tool_name": "Write", "tool_input": {
+                "file_path": theory, "content": "lemma x: True by auto"},
+                "transcript_path": transcript}
+            command = sys.executable + " " + provider
+            code, err = run_hook(payload, [
+                "--searchable", "auto",
+                "--semantic-fingerprint-command", command,
+            ])
+            self.assertEqual(code, 0, err)
+        finally:
+            os.remove(transcript)
+            os.remove(theory)
+            os.remove(provider)
+
+    def test_semantic_provider_can_verify_statement_rename(self):
+        old = "theory T imports Main begin\nlemma old_name: True by auto\nend\n"
+        new = "theory T imports Main begin\nlemma new_name: True by auto\nend\n"
+        fd, path = tempfile.mkstemp(suffix=".thy")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(old)
+        provider_fd, provider = tempfile.mkstemp(suffix=".py")
+        with os.fdopen(provider_fd, "w", encoding="utf-8") as f:
+            f.write(
+                "import json, sys\n"
+                "request = json.load(sys.stdin)\n"
+                "print(json.dumps({\"before\": [\"same-goal\"] * "
+                "len(request[\"before\"][\"units\"]), \"after\": "
+                "[\"same-goal\"] * len(request[\"after\"][\"units\"])}))\n")
+        try:
+            payload = {"tool_name": "Write", "tool_input": {
+                "file_path": path, "content": new}}
+            command = sys.executable + " " + provider
+            code, err = run_hook(payload, [
+                "--searchable", "auto",
+                "--semantic-fingerprint-command", command,
+            ])
+            self.assertEqual(code, 0, err)
+        finally:
+            os.remove(path)
+            os.remove(provider)
 
     def test_str_replace_preexisting_anchor_closer_not_blocked(self):
         # Regression for the reported false positive: a str-replace whose anchor
@@ -530,7 +765,7 @@ class NoGuessedProofs(unittest.TestCase):
             payload["transcript_path"] = path
             code, err = run_hook(payload, ["--searchable", "auto"])
             self.assertEqual(code, 2)
-            self.assertIn("NOT found", err)
+            self.assertIn("without matching proof provenance", err)
         finally:
             os.remove(path)
 
@@ -1128,7 +1363,7 @@ class NoGuessedProofs(unittest.TestCase):
             os.remove(path)
 
     def test_first_non_allowed_method_after_allowed_blocks(self):
-        # The by_method_names loop must SKIP an allow-listed closer and still
+        # The candidate loop must SKIP an allow-listed closer and still
         # block a later non-allowed one in the same write -- not just look at the
         # first `by`. Every existing case has a single method; this exercises the loop.
         code, err = run_hook(thy_write("lemma a by auto\nlemma b by metis"),

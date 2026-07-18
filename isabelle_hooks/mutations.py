@@ -19,6 +19,7 @@ class PatchMutation:
 
     path: str
     added_text: str
+    before_text: str
     context_text: str
     changed_ranges: tuple
 
@@ -29,6 +30,8 @@ class VirtualFileStore:
     def __init__(self, reader):
         self._reader = reader
         self._snapshots = {}
+        self._originals = {}
+        self._paths = {}
 
     @staticmethod
     def _key(path):
@@ -43,9 +46,23 @@ class VirtualFileStore:
                 return path, self._snapshots[key]
         path, content = self._reader(paths)
         if path is not None and content is not None:
-            self._snapshots[self._key(path)] = content
+            key = self._key(path)
+            self._snapshots[key] = content
+            self._originals.setdefault(key, content)
+            self._paths[key] = path
         return path, content
 
     def write(self, path, content):
         if isinstance(path, str) and isinstance(content, str):
-            self._snapshots[self._key(path)] = content
+            key = self._key(path)
+            self._originals.setdefault(key, self._snapshots.get(key))
+            self._snapshots[key] = content
+            self._paths[key] = path
+
+    def changes(self):
+        """Return path -> (original, current) for snapshots changed by this call."""
+        return {
+            self._paths[key]: (self._originals.get(key), current)
+            for key, current in self._snapshots.items()
+            if self._originals.get(key) != current
+        }

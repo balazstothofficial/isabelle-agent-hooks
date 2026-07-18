@@ -30,6 +30,9 @@ from .syntax import _strip
 
 TranscriptEvent = namedtuple("TranscriptEvent", "kind call_id name text mutates thy_text",
                              defaults=(False, ""))
+ProofEvidence = namedtuple("ProofEvidence", "key method goal explicit",
+                           defaults=(None, False))
+EVIDENCE_MARKER = "isabelle_hook_evidence "
 
 # Transcript content-block schemas. VERIFIED for Claude (tool_use / tool_result, under
 # {"message":{"content":[...]}}). The Codex/OpenCode function-call variants below are a
@@ -67,9 +70,9 @@ def _invalidates_search_evidence(name, cmd, is_hammer, mutates=False):
 
 
 def _result_text(v):
-    """Flatten a tool_result payload (str, or a list/dict of text blocks) to lowercase."""
+    """Flatten a tool_result payload without altering opaque evidence fingerprints."""
     if isinstance(v, str):
-        return v.lower()
+        return v
     if isinstance(v, list):
         parts = []
         for it in v:
@@ -79,10 +82,10 @@ def _result_text(v):
                 t = it.get("text") or it.get("content") or ""
                 if isinstance(t, str):
                     parts.append(t)
-        return " ".join(parts).lower()
+        return " ".join(parts)
     if isinstance(v, dict):
         t = v.get("text") or v.get("content") or ""
-        return t.lower() if isinstance(t, str) else ""
+        return t if isinstance(t, str) else ""
     return ""
 
 
@@ -231,8 +234,25 @@ _TAIL_LINES_PER_CALL = 8
 _TAIL_MIN_LINES = 100
 
 
-def recent_method_evidence(path, window, method, triggers):
-    """Return the current evidence keys proving `method` was FOUND, oldest first.
+def _explicit_evidence(text):
+    records = []
+    for line in text.splitlines():
+        marker = line.lower().find(EVIDENCE_MARKER)
+        if marker < 0:
+            continue
+        try:
+            value = json.loads(line[marker + len(EVIDENCE_MARKER):])
+        except Exception:
+            continue
+        method = value.get("method") if isinstance(value, dict) else None
+        goal = value.get("goal") if isinstance(value, dict) else None
+        if isinstance(method, str) and isinstance(goal, str) and goal:
+            records.append((method.lower(), goal))
+    return records
+
+
+def recent_method_evidence_map(path, window, methods, triggers):
+    """Return method -> evidence records after one transcript scan.
 
     Within the recent window, one of the `triggers` (proof-search
     tools) ran AND the method being written appears in *that run's own result* -- i.e.
@@ -263,13 +283,16 @@ def recent_method_evidence(path, window, method, triggers):
     goal cannot authorize guesses indefinitely. Read-only calls may remain interleaved
     when call IDs let us pair the hammer with its own result.
 
-    The window is the last `window` tool CALLS plus every event after the earliest of
-    them. Missing/unparseable transcripts and non-matching results yield []."""
+    Goal-bound ``ISABELLE_HOOK_EVIDENCE`` records emitted by a search integration are
+    preferred. Natural-language matching remains a compatibility fallback.
+    """
+    methods = tuple(dict.fromkeys(method.lower() for method in methods))
+    empty = {method: [] for method in methods}
     if not path or not os.path.exists(path):
-        return []
+        return empty
     events = _read_events(path, max(window * _TAIL_LINES_PER_CALL, _TAIL_MIN_LINES))
     if not events:
-        return []
+        return empty
     # Claude Code versions differ on whether the guarded tool_use is persisted before
     # or after PreToolUse runs. In the former ordering, the current edit is the final
     # call and cannot yet have a result. Drop only that in-flight edit. Earlier edits
@@ -280,21 +303,24 @@ def recent_method_evidence(path, window, method, triggers):
             and _is_edit_call(events[-1].name, events[-1].mutates)):
         events = events[:-1]
     if not events:
-        return []
+        return empty
     call_positions = [i for i, e in enumerate(events) if e.kind == "call"]
     if not call_positions:
-        return []
+        return empty
     start = call_positions[-window] if len(call_positions) >= window else 0
     recent = events[start:]
 
     triggers = [t.lower() for t in triggers]
     trigger_rxs = [re.compile(r"\b" + re.escape(t) + r"\b") for t in triggers]
-    mrx = re.compile(r"\b" + re.escape(method.lower()) + r"\b")
+    method_rxs = {
+        method: re.compile(r"\b" + re.escape(method) + r"\b", re.IGNORECASE)
+        for method in methods
+    }
     pending_by_id = {}
     pending_adjacent = False
     in_theory = None   # (evidence key, epoch) of the latest armed in-theory search
     query_calls = set()  # call ids of proof-state queries (results may carry finds)
-    found = {}         # insertion-ordered evidence keys, all still valid
+    found = {method: {} for method in methods}
     state_epoch = 0
     for event_index, e in enumerate(recent):
         if e.kind == "call":
@@ -305,7 +331,8 @@ def recent_method_evidence(path, window, method, triggers):
             if (not is_hammer
                     and _invalidates_search_evidence(e.name, e.text, is_hammer, e.mutates)):
                 state_epoch += 1
-                found.clear()
+                for records in found.values():
+                    records.clear()
             if arms_in_theory:
                 key = (("id", str(e.call_id)) if e.call_id
                        else ("event", str(start + event_index)))
@@ -322,18 +349,37 @@ def recent_method_evidence(path, window, method, triggers):
             if e.call_id:
                 if e.call_id in pending_by_id:
                     search_epoch = pending_by_id.pop(e.call_id)
-                    if search_epoch == state_epoch and mrx.search(e.text):
-                        found[("id", str(e.call_id))] = None
+                    if search_epoch == state_epoch:
+                        key = ("id", str(e.call_id))
+                        for method, rx in method_rxs.items():
+                            if rx.search(e.text):
+                                found[method][key] = ProofEvidence(
+                                    key, method, None, False)
+                        for method, goal in _explicit_evidence(e.text):
+                            if method in found:
+                                found[method][key] = ProofEvidence(
+                                    key, method, goal, True)
                 elif (in_theory is not None and in_theory[1] == state_epoch
-                        and e.call_id in query_calls and mrx.search(e.text)):
-                    found[in_theory[0]] = None
+                        and e.call_id in query_calls):
+                    key = in_theory[0]
+                    for method, rx in method_rxs.items():
+                        if rx.search(e.text):
+                            found[method][key] = ProofEvidence(
+                                key, method, None, False)
+                    for method, goal in _explicit_evidence(e.text):
+                        if method in found:
+                            found[method][key] = ProofEvidence(
+                                key, method, goal, True)
             else:
-                if pending_adjacent and mrx.search(e.text):
-                    found[("event", str(start + event_index))] = None
+                if pending_adjacent:
+                    key = ("event", str(start + event_index))
+                    for method, rx in method_rxs.items():
+                        if rx.search(e.text):
+                            found[method][key] = ProofEvidence(
+                                key, method, None, False)
+                    for method, goal in _explicit_evidence(e.text):
+                        if method in found:
+                            found[method][key] = ProofEvidence(
+                                key, method, goal, True)
                 pending_adjacent = False
-    return list(found)
-
-
-def method_found_recently(path, window, method, triggers):
-    """Compatibility boolean view used by tests and manual transcript diagnostics."""
-    return bool(recent_method_evidence(path, window, method, triggers))
+    return {method: list(records.values()) for method, records in found.items()}

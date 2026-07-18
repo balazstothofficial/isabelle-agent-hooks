@@ -7,12 +7,12 @@
 // Claude Code and Codex configure these guards through JSON hook config
 // (.claude/settings.local.json / .codex/hooks.json). OpenCode has no such config --
 // only a TypeScript plugin API -- so this plugin bridges OpenCode's
-// `tool.execute.before` onto the SAME Python guards: it normalizes OpenCode's tool
-// name + args into the stdin contract the guards read (see README "Contract"), runs
-// each guard via the configured interpreter, and throws on exit code 2 to deny the
+// `tool.execute.before` onto the Python guard: it normalizes OpenCode's tool
+// name + args into the stdin contract (see README "Contract"), runs the configured
+// guard via the configured interpreter, and throws on exit code 2 to deny the
 // call. It also logs every tool call AND its result to a per-worktree JSONL so
-// no_guessed_proofs' "recent sledgehammer/try0" escape hatch keeps working: that
-// guard only accepts a searchable `by` method when the method appears in the search
+// the recent sledgehammer/try0 evidence path keeps working: the guard only accepts a
+// searchable `by` method when the method appears in the search
 // run's OWN result, so a transcript with calls but no results can never satisfy it
 // (every such write would then be over-blocked). tool.execute.after supplies the
 // paired result event.
@@ -24,8 +24,7 @@
 //     "interpreter": "python3",              // optional; see INTERPRETER below
 //     "defaultMatcher": "<project matcher>",
 //     "hooks": [
-//       { "script": "no_guessed_proofs.py" },
-//       { "script": "no_apply_scripts.py" }
+//       { "script": "isabelle_guards.py" }
 //     ]
 //   }
 //
@@ -83,6 +82,8 @@ const CONFIG = loadConfig();
 // $ISABELLE_HOOKS_PYTHON or `python3` on PATH.
 const INTERPRETER = CONFIG.interpreter || process.env.ISABELLE_HOOKS_PYTHON || "python3";
 const HOOKS = CONFIG.hooks;
+const EVIDENCE_FIELD = "isabelleHookEvidence";
+const EVIDENCE_MARKER = "ISABELLE_HOOK_EVIDENCE ";
 
 // OpenCode tool id -> the tool_name the Python guards key on (Claude's names).
 function claudeToolName(tool) {
@@ -93,7 +94,7 @@ function claudeToolName(tool) {
   return tool; // MCP tools (e.g. "..._write_file") pass through
 }
 
-// OpenCode tool args -> the tool_input isabelle_hook_common.py reads.
+// OpenCode tool args -> the normalized Python guard contract.
 function toolInput(tool, args) {
   args = args || {};
   if (tool === "bash") return { command: args.command };
@@ -114,7 +115,7 @@ export const IsabelleGuards = async ({ worktree, directory }) => {
   const transcript = join(tmpdir(), "opencode-isabelle-guard-" + encodeURIComponent(root) + ".jsonl");
 
   // Append one content block, wrapped as the {"message":{"content":[…]}} envelope
-  // the Python transcript parser (no_guessed_proofs._iter_blocks) recognises.
+  // the Python transcript parser recognises.
   function logBlock(block) {
     try {
       appendFileSync(transcript, JSON.stringify({ message: { content: [block] } }) + "\n");
@@ -133,7 +134,19 @@ export const IsabelleGuards = async ({ worktree, directory }) => {
   // write would be blocked). `content` is the tool's textual output verbatim; the
   // Python side (_result_text) flattens str/list/dict shapes and lowercases them.
   function logResult(id, content) {
-    logBlock({ type: "tool_result", tool_use_id: id, content: content == null ? "" : content });
+    let normalized = content == null ? "" : content;
+    const evidence = content && typeof content === "object"
+      ? content[EVIDENCE_FIELD] : undefined;
+    if (evidence && typeof evidence.method === "string"
+        && typeof evidence.goal === "string" && evidence.goal) {
+      normalized = [normalized, {
+        text: EVIDENCE_MARKER + JSON.stringify({
+          method: evidence.method,
+          goal: evidence.goal,
+        }),
+      }];
+    }
+    logBlock({ type: "tool_result", tool_use_id: id, content: normalized });
   }
 
   return {

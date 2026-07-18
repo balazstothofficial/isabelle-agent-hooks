@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for the no_apply_scripts.py PreToolUse guard.
+"""Unit tests for the apply-script policy in the combined guard.
 
 The guard unconditionally blocks any apply-script in an Isabelle theory write
 (there is no escape hatch). It reads stdin JSON and exits 0 (allow) or 2 (block,
@@ -7,7 +7,7 @@ explanation on stderr); it is driven here as a subprocess -- the real harness
 contract -- so the test sees the exact exit code the agent harness
 (Claude/Codex/OpenCode) acts on.
 
-Run directly: python3 test/no_apply_scripts.test.py
+Run directly: python3 test/isabelle_guards_apply.test.py
 """
 import os
 import unittest
@@ -15,16 +15,16 @@ import unittest
 from hook_test_support import run_hook as run_hook_process, run_without_package, thy_write
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-APPLY = os.path.join(ROOT, "no_apply_scripts.py")
+GUARD = os.path.join(ROOT, "isabelle_guards.py")
 
 
 def run_hook(payload):
-    return run_hook_process(APPLY, payload)
+    return run_hook_process(GUARD, payload, ["--policies", "apply-script"])
 
 
 class NoApplyScripts(unittest.TestCase):
     def test_missing_shared_package_fails_open_cleanly(self):
-        code, err = run_without_package(APPLY, thy_write("apply auto"))
+        code, err = run_without_package(GUARD, thy_write("apply auto"))
         self.assertEqual(code, 0, err)
         self.assertIn("shared helper unavailable", err)
         self.assertNotIn("Traceback", err)

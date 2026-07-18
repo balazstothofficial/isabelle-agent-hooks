@@ -28,7 +28,7 @@ _INLINE_WS = " \t\r\f\v"
 # same line (proof chaining, flow, and statement starters). Outside parens the token
 # after method1 is method2 UNLESS it is one of these -- exactly how Isabelle's own parser
 # stops (a reserved word is not a method nameref). None of these is a proof method, so
-# listing one can never suppress a real guess; the same-line bound in _by_method_names is
+# listing one can never suppress a real guess; the same-line bound in by_method_hits is
 # a second guard, so a keyword accidentally omitted here still cannot spill into the next
 # command across a newline.
 _ISAR_KEYWORDS = frozenset("""
@@ -141,13 +141,6 @@ def by_method_hits(text):
             if unit2 is not None:
                 hits.extend(MethodHit(name, offset, mo.start()) for name, offset in unit2[0])
     return hits
-
-
-def by_method_names(text):
-    """Compatibility view used by parser-focused tests and manual diagnostics."""
-    return [hit.name for hit in by_method_hits(text)]
-
-
 def _hit_touches_changes(hit, changed_ranges):
     """Whether a parsed closer was introduced by one of the changed source spans."""
     if changed_ranges is None:

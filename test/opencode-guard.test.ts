@@ -26,7 +26,10 @@ const SOURCE = join(ROOT, "opencode-guard.ts");
 // A real interpreter to stand in for a packaged python3. Resolved at runtime so this
 // works both locally and in CI (which has python3 on PATH).
 const INTERP = Bun.which("python3") || "python3";
-const REAL_NO_APPLY_HOOKS = [{ matcher: ".*write_file", script: "no_apply_scripts.py", args: [] }];
+const REAL_GUARD_HOOKS = [{
+  matcher: ".*write_file", script: "isabelle_guards.py",
+  args: ["--policies", "apply-script"],
+}];
 const REAL_PACKAGE_SCRIPTS = Object.fromEntries(
   readdirSync(join(ROOT, "isabelle_hooks"))
     .filter((name) => name.endsWith(".py"))
@@ -35,9 +38,8 @@ const REAL_PACKAGE_SCRIPTS = Object.fromEntries(
       readFileSync(join(ROOT, "isabelle_hooks", name), "utf8"),
     ]),
 );
-const REAL_NO_APPLY_SCRIPTS = {
-  "no_apply_scripts.py": readFileSync(join(ROOT, "no_apply_scripts.py"), "utf8"),
-  "isabelle_hook_common.py": readFileSync(join(ROOT, "isabelle_hook_common.py"), "utf8"),
+const REAL_GUARD_SCRIPTS = {
+  "isabelle_guards.py": readFileSync(join(ROOT, "isabelle_guards.py"), "utf8"),
   ...REAL_PACKAGE_SCRIPTS,
 };
 
@@ -196,8 +198,8 @@ describe("tool.execute.before", () => {
   test("the real guard blocks a direct OpenCode MCP write_file apply script", async () => {
     await expect(
       runBefore(
-        REAL_NO_APPLY_HOOKS,
-        REAL_NO_APPLY_SCRIPTS,
+        REAL_GUARD_HOOKS,
+        REAL_GUARD_SCRIPTS,
         "iq-dev_write_file",
         {
           path: "Foo.thy",
@@ -212,8 +214,8 @@ describe("tool.execute.before", () => {
   test("the real guard allows a direct OpenCode MCP write_file control", async () => {
     await expect(
       runBefore(
-        REAL_NO_APPLY_HOOKS,
-        REAL_NO_APPLY_SCRIPTS,
+        REAL_GUARD_HOOKS,
+        REAL_GUARD_SCRIPTS,
         "iq-dev_write_file",
         {
           path: "Foo.thy",
@@ -350,7 +352,7 @@ describe("tool.execute.before", () => {
   });
 });
 
-// The no_guessed_proofs escape hatch (recent_method_evidence in the Python guard)
+// The combined guard's escape hatch (recent proof evidence in the Python policy)
 // only accepts a searchable `by` method when that method appears in the search run's
 // OWN result -- so the bridge must log a paired tool_result, not just the tool_use.
 describe("transcript logging (escape-hatch evidence)", () => {
@@ -401,6 +403,24 @@ describe("transcript logging (escape-hatch evidence)", () => {
     expect(blocks[0]).toEqual({ type: "tool_result", tool_use_id: "call_9", content: "" });
   });
 
+  test("structured search evidence is normalized to a goal-bound marker", async () => {
+    const root = makeWorktree({ config: { hooks: [] } });
+    const plugin = await pluginFor(root);
+    await plugin["tool.execute.after"](
+      { tool: "sledgehammer", callID: "call_goal" },
+      { output: {
+        text: "Try this: by auto",
+        isabelleHookEvidence: { method: "auto", goal: "goal-digest" },
+      } },
+    );
+
+    const blocks = readTranscript(root);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].content[1].text).toContain(
+      'ISABELLE_HOOK_EVIDENCE {"method":"auto","goal":"goal-digest"}',
+    );
+  });
+
   test('a "/" worktree sentinel uses the project directory as the transcript key', async () => {
     const root = makeWorktree({ config: { hooks: [] } });
     const m = await loadModule(root);
@@ -417,8 +437,7 @@ describe("transcript logging (escape-hatch evidence)", () => {
 
   test("a denied write is not logged and cannot poison a corrected retry", async () => {
     const scripts = {
-      ...REAL_NO_APPLY_SCRIPTS,
-      "no_guessed_proofs.py": readFileSync(join(ROOT, "no_guessed_proofs.py"), "utf8"),
+      ...REAL_GUARD_SCRIPTS,
       "Hook_Searchable_Methods.thy": readFileSync(
         join(ROOT, "Hook_Searchable_Methods.thy"), "utf8",
       ),
@@ -429,8 +448,9 @@ describe("transcript logging (escape-hatch evidence)", () => {
         interpreter: INTERP,
         hooks: [{
           matcher: "Write",
-          script: "no_guessed_proofs.py",
-          args: ["--searchable", "auto", "--found-via", "sledgehammer"],
+          script: "isabelle_guards.py",
+          args: ["--policies", "guessed-proof", "--searchable", "auto",
+                 "--found-via", "sledgehammer"],
         }],
       },
     });

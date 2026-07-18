@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""Unit tests for the shared Isabelle hook parser (isabelle_hook_common.py).
+"""Unit tests for shared Isabelle edit analysis.
 
-extract_thy_edit() is the single parsing surface behind both proof guards
-(no_apply_scripts.py, no_guessed_proofs.py), so a bug here mis-fires *both*. It
-reads the hook's stdin JSON and returns (check_text, transcript) where check_text
-is the added theory text with comments/cartouches/strings stripped, or None when
-the call does not target a *.thy file.
+extract_thy_edits() reads the hook's stdin JSON and returns structured added-theory
+fragments plus the transcript path.
 
-Run directly: python3 test/isabelle_hook_common.test.py
+Run directly: python3 test/edit_analysis.test.py
 """
 import io
 import json
@@ -18,16 +15,18 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-import isabelle_hook_common as hook
+from isabelle_hooks import edits as hook
 from isabelle_hooks import protocol
 
 
 def run(payload):
-    """Feed `payload` (a dict) as stdin JSON and return extract_thy_edit()."""
+    """Feed a payload and return the joined scan text plus transcript path."""
     saved = sys.stdin
     sys.stdin = io.StringIO(json.dumps(payload))
     try:
-        return hook.extract_thy_edit()
+        fragments, transcript = hook.extract_thy_edits()
+        return (("\n".join(fragment.text for fragment in fragments)
+                 if fragments is not None else None), transcript)
     finally:
         sys.stdin = saved
 
@@ -901,7 +900,9 @@ class FailOpen(unittest.TestCase):
         saved = sys.stdin
         sys.stdin = io.StringIO("{not json")
         try:
-            check, transcript = hook.extract_thy_edit()
+            fragments, transcript = hook.extract_thy_edits()
+            check = ("\n".join(fragment.text for fragment in fragments)
+                     if fragments is not None else None)
         finally:
             sys.stdin = saved
         self.assertIsNone(check)

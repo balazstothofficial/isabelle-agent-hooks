@@ -9,6 +9,7 @@ from collections import namedtuple
 # boundary without treating pre-existing proof text as newly added.
 EditFragment = namedtuple(
     "EditFragment",
-    "path text source line context_text context_source context_line changed_ranges",
-    defaults=(None, None, None, None),
+    "path text source line context_text context_source context_line changed_ranges "
+    "before_source after_source",
+    defaults=(None, None, None, None, None, None),
 )

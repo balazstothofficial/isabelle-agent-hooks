@@ -18,6 +18,10 @@ class GuardDefaults:
         default_factory=lambda: os.environ.get("ISABELLE_HOOKS_ISABELLE", "isabelle"))
     identity_timeout_seconds: int = 15
     discovery_timeout_seconds: int = 90
+    semantic_fingerprint_timeout_seconds: int = 5
+    semantic_fingerprint_command: str | None = field(
+        default_factory=lambda: os.environ.get(
+            "ISABELLE_HOOKS_SEMANTIC_FINGERPRINT_COMMAND") or None)
 
 
 DEFAULTS = GuardDefaults()

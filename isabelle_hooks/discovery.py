@@ -5,6 +5,7 @@ import os
 import subprocess
 import tempfile
 import time
+import shutil
 
 try:
     import fcntl
@@ -52,6 +53,74 @@ def _load_cache(path):
     return None
 
 
+def _fast_identity(command):
+    """Cheap launcher identity for the PreToolUse hot path (no Isabelle process)."""
+    configured = os.environ.get("ISABELLE_HOOKS_IDENTITY")
+    executable = shutil.which(command) if not os.path.isabs(command) else command
+    executable = os.path.realpath(executable) if executable else command
+    try:
+        stat = os.stat(executable)
+        launcher = (executable, stat.st_size, stat.st_mtime_ns)
+    except Exception:
+        launcher = (executable, None, None)
+    material = (QUERY_VERSION, command, configured, launcher, _file_hash(QUERY_THEORY))
+    return hashlib.sha256(repr(material).encode()).hexdigest()[:24]
+
+
+def _active_cache_path(command):
+    command_key = hashlib.sha256(command.encode()).hexdigest()[:20]
+    return os.path.join(_cache_root(), "active-" + command_key + ".json")
+
+
+def _write_active_cache(command, home, fingerprint, methods):
+    root = _cache_root()
+    os.makedirs(root, exist_ok=True)
+    target = _active_cache_path(command)
+    fd, tmp = tempfile.mkstemp(prefix="active-", suffix=".json", dir=root)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({
+                "version": QUERY_VERSION,
+                "created": time.time(),
+                "command": command,
+                "home": home,
+                "discovery_fingerprint": fingerprint,
+                "fast_identity": _fast_identity(command),
+                "methods": sorted(methods),
+            }, f)
+            f.write("\n")
+        os.replace(tmp, target)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def load_searchable_methods(command):
+    """Load the prepared registry without launching Isabelle.
+
+    Missing/stale registries return ``None`` so callers can use the conservative
+    require-evidence-for-all fallback.  ``refresh_searchable_methods`` is the explicit
+    slow lifecycle operation that prepares this manifest.
+    """
+    path = _active_cache_path(command)
+    try:
+        with open(path, encoding="utf-8") as f:
+            obj = json.load(f)
+        if (obj.get("version") != QUERY_VERSION
+                or obj.get("command") != command
+                or obj.get("fast_identity") != _fast_identity(command)):
+            return None, "searchable-method registry is stale; refresh it outside the hook"
+        methods = obj.get("methods")
+        if (not isinstance(methods, list) or not methods
+                or not all(isinstance(method, str) for method in methods)):
+            raise ValueError("invalid method registry")
+        return set(methods), None
+    except FileNotFoundError:
+        return None, "searchable-method registry is not prepared; refresh it outside the hook"
+    except Exception as exc:
+        return None, "searchable-method registry is unavailable: %s" % exc
+
+
 def _discover_identity(command):
     proc = subprocess.run([command, "getenv", "-b", "ISABELLE_HOME"], text=True,
                           capture_output=True, timeout=DEFAULTS.identity_timeout_seconds)
@@ -91,7 +160,7 @@ def _run_discovery(command):
 def discover_searchable_methods(command):
     """Return (methods, warning). A stale valid cache is preferred to unsafe emptiness."""
     try:
-        _home, stable, fingerprint = _discover_identity(command)
+        home, stable, fingerprint = _discover_identity(command)
     except Exception as exc:
         return None, "method discovery failed: %s" % exc
 
@@ -99,6 +168,10 @@ def discover_searchable_methods(command):
     current = os.path.join(root, "%s-%s.json" % (stable, fingerprint))
     cached = _load_cache(current)
     if cached:
+        try:
+            _write_active_cache(command, home, fingerprint, cached)
+        except Exception:
+            pass
         return cached, None
 
     lock_file = None
@@ -109,6 +182,10 @@ def discover_searchable_methods(command):
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         cached = _load_cache(current)
         if cached:
+            try:
+                _write_active_cache(command, home, fingerprint, cached)
+            except Exception:
+                pass
             return cached, None
         methods = _run_discovery(command)
         fd, tmp = tempfile.mkstemp(prefix="methods-", suffix=".json", dir=root)
@@ -121,6 +198,10 @@ def discover_searchable_methods(command):
         finally:
             if os.path.exists(tmp):
                 os.unlink(tmp)
+        try:
+            _write_active_cache(command, home, fingerprint, methods)
+        except Exception:
+            pass
         return methods, None
     except Exception as exc:
         stale = []
@@ -133,6 +214,10 @@ def discover_searchable_methods(command):
         for name in stale:
             cached = _load_cache(os.path.join(root, name))
             if cached:
+                try:
+                    _write_active_cache(command, home, fingerprint, cached)
+                except Exception:
+                    pass
                 return cached, "method discovery failed; using previous cache: %s" % exc
         return None, "method discovery failed and no cache is available: %s" % exc
     finally:
@@ -143,3 +228,8 @@ def discover_searchable_methods(command):
                 except Exception:
                     pass
             lock_file.close()
+
+
+def refresh_searchable_methods(command):
+    """Explicit slow registry refresh used at install/update time."""
+    return discover_searchable_methods(command)
