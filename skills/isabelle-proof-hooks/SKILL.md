@@ -27,6 +27,11 @@ The installation may enable either policy or both:
 6. Confirm the written command finishes in the real theory buffer. Search output is
    evidence the method was found, not final validation.
 
+For a proof with several searchable closers, build it as a skeleton first: write the
+structured outline with `sorry` in place of each closer (`sorry` needs no evidence),
+then fill one closer per write, each preceded by its own search on that goal. Do not
+batch several new closers into one write after a single search.
+
 Goal-bound evidence may be emitted by the proof-search integration. Never fabricate or
 manually copy its marker; the integration owns it. If a diagnostic says evidence belongs
 to another goal, search again on the current goal.

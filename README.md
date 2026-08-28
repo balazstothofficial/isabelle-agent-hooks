@@ -142,6 +142,12 @@ Renames and other formatting-level refactors can additionally be cleared by an
 external PIDE-based fingerprint provider; see
 [docs/internals.md](docs/internals.md).
 
+The workflow that fits these rules, and the one agents settle into in practice, is
+skeleton-then-fill: write the structured proof with `sorry` in place of each closer
+(a `sorry` needs no evidence), then fill in one closer per write, each immediately
+preceded by its own try0 or sledgehammer call on that exact goal. Batching several
+closers into one write after a single search gets blocked.
+
 ## Prover MCP servers (I/Q and PIDE)
 
 The hook doesn't care how the agent talks to Isabelle: any transcript in which a
@@ -164,6 +170,12 @@ sides of it:
 - Its REPL state changes (`repl_undo`, `repl_reset`, `repl_load`, and any
   `repl_step` that isn't itself a search) invalidate outstanding evidence, just
   like a file edit.
+
+One caveat about the REPL: `repl_step` applies a terminal method without running
+its proof search, so `by blast` can report success in milliseconds even when the
+tactic loops or fails in the real theory. REPL success means nothing for a closer.
+This is why only sledgehammer/try0 results count as evidence, and why a written
+proof still has to be confirmed in the theory buffer.
 
 **[isabelle-pide-mcp](https://github.com/kappelmann/isabelle-pide-mcp)** is also
 supported, though I've tested it less. It has no search tool at all; searching
@@ -221,7 +233,11 @@ never authorizes anything on its own.
 
 It can also false-positive: evidence matching is heuristic, and a legitimate
 refactor the matcher can't follow will be asked for search evidence it shouldn't
-strictly need.
+strictly need. The known case is an edit that replaces a large region without an
+anchor, such as the I/Q `write_file` `line` command: whole-buffer writes are
+diffed against the file on disk, but a range replacement carries only its new
+text, so pre-existing closers inside the range get re-flagged as new. Prefer
+anchored `str_replace` edits, or several small ones, over large range rewrites.
 
 ## Other agents (Codex, OpenCode)
 
