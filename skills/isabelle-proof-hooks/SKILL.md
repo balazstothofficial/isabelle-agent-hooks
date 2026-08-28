@@ -11,7 +11,8 @@ different write tool, disguise proof text, or weaken the hook configuration.
 The installation may enable either policy or both:
 
 - `apply-script`: write structured Isar; never add an `apply` chain.
-- `guessed-proof`: search-discoverable closers need search or relocation provenance.
+- `guessed-proof`: search-discoverable closers need a search result or relocation as
+  evidence.
 
 ## Add a new closer
 
@@ -24,7 +25,7 @@ The installation may enable either policy or both:
 5. Write exactly the returned closer promptly. One search result authorizes one closer;
    several new closers need separate finds.
 6. Confirm the written command finishes in the real theory buffer. Search output is
-   provenance, not final validation.
+   evidence the method was found, not final validation.
 
 Goal-bound evidence may be emitted by the proof-search integration. Never fabricate or
 manually copy its marker; the integration owns it. If a diagnostic says evidence belongs
@@ -52,7 +53,7 @@ to obtain fresh proof-search evidence—not to work around the guard.
 
 - `apply script`: rewrite the proof as `proof ... qed`, `by`, `using ... by`, or smaller
   structured `have` steps.
-- `without matching proof provenance`: search the current goal and write the returned
+- `without a matching proof-search result`: search the current goal and write the returned
   method before another mutation.
 - `different goal`: rerun search on this goal.
 - `registry is not prepared/stale`: run the installed

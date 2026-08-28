@@ -1,149 +1,267 @@
 # Isabelle agent hooks
 
-Experimental, best-effort PreToolUse enforcement for two Isabelle proof-discipline
-rules:
+Coding agents are bad at Isabelle in one very specific way: they don't want to run
+sledgehammer. Ask Claude Code or Codex to close a goal and it will type `by (metis
+foo bar)` from pattern memory, watch it fail, mutate the lemma list, and repeat —
+when one sledgehammer call would have settled it. The other habit is falling back to
+unstructured `apply` scripts. After watching both
+loops enough times on my own developments, I wrote this hook: it vetoes those two
+kinds of edits before they land, so the cheapest path available to the agent becomes
+the correct workflow.
 
-- use structured Isar instead of `apply` scripts;
-- use search-discoverable proof methods only with proof-search provenance.
+The mechanism is an agent hook. Claude Code, Codex, and OpenCode can run a command
+before every file write, and that command can veto the write and print an
+explanation the agent sees. This repository is that command, specialized for `.thy`
+files, plus a skill file that tells the agent how to respond when it gets blocked.
 
-The single `isabelle_guards.py` entry point normalizes an edit once and applies both
-policies. It supports standard coding-agent writes, `apply_patch`, literal nested calls
-inside Codex `functions.exec`, AutoCorrode I/Q writes, and `isabelle-pide-mcp` edits.
-Unsupported or malformed calls fail open rather than blocking the agent.
+I've been running it since July 2026 on Isabelle2025-2 and the Isabelle development
+version, with the agent driving the prover through an MCP server — see
+[Prover MCP servers](#prover-mcp-servers-iq-and-pide). It is experimental and
+best-effort — see [Limitations](#limitations) before relying on it.
 
-## Proof provenance
+## What this is not
 
-A search-discoverable closer is accepted from either source:
+This is not a verification tool, and "guard" is not a soundness claim. It constrains
+the *edits an LLM agent makes*, nothing more:
 
-1. a recent `sledgehammer`/`try0` result that names the method;
-2. an existing proof unit relocated within the same atomic edit.
+- It never talks to the Isabelle kernel and never checks whether a proof is valid.
+  Isabelle remains the only arbiter of correctness.
+- It inspects text. A proof that passes the hook can still fail; a hook-approved
+  edit means "plausibly came from the right workflow", not "correct".
+- It is a guardrail for a cooperative agent, not a sandbox against an adversarial
+  one.
 
-Search integrations can bind evidence to a goal by including this line in their result:
+## What it looks like
+
+The agent tries to write a guessed proof:
+
+```isabelle
+lemma rev_rev: "rev (rev xs) = xs"
+  by metis
+```
+
+The write is rejected and the agent sees:
 
 ```text
-ISABELLE_HOOK_EVIDENCE {"method":"metis","goal":"<goal-fingerprint>"}
+[isabelle-theory-guard] BLOCKED write to an Isabelle theory.
+It introduces method `metis` without a matching proof-search result.
+
+Location: Scratch.thy:2
+Source: by metis
+
+New closers must be found by sledgehammer/try0. Exact proof-unit relocations within one atomic edit are allowed automatically.
+Fix: run sledgehammer/try0 on this goal, then write the method it returns. If nothing is found, the step is too big -- break it into smaller `have`s.
 ```
 
-The marker must occur in the paired result of a recognized search call. Goal-bound
-evidence is preferred; natural-language result matching remains the fallback for search
-tools that do not yet emit markers. Each search result is single-use, and a completed
-state-changing operation invalidates outstanding evidence.
+The agent then actually runs sledgehammer, gets `by (metis rev_rev_ident)` back,
+and that write goes through because the method now appears in a recent search
+result in the session transcript.
 
-OpenCode search tools may instead return
-`{"isabelleHookEvidence":{"method":"metis","goal":"..."}}`; the adapter converts
-that structured field to the canonical marker before recording the result.
+## Installing for Claude Code
 
-Relocations are matched one-for-one by file, lexical context, statement, and closer.
-Reordering an existing proof unit is allowed, while copying it or moving only its method
-to a different statement is not. If static matching is inconclusive, normal search
-provenance is required.
+You need Python ≥ 3.10 (the hook itself is standard library only) and, for the
+registry step below, an `isabelle` launcher on `PATH` with a built HOL session.
+From your Isabelle project root:
 
-### Semantic refactor provider
+```bash
+git clone https://github.com/balazstothofficial/isabelle-agent-hooks /tmp/isabelle-agent-hooks
+mkdir -p .claude/hooks .claude/skills
+cp -R /tmp/isabelle-agent-hooks/isabelle_guards.py \
+      /tmp/isabelle-agent-hooks/refresh_searchable_methods.py \
+      /tmp/isabelle-agent-hooks/Hook_Searchable_Methods.thy \
+      /tmp/isabelle-agent-hooks/isabelle_hooks \
+      .claude/hooks/
+cp -R /tmp/isabelle-agent-hooks/skills/isabelle-proof-hooks .claude/skills/
+```
 
-Renames and other semantically unchanged refactors can be verified by an external PIDE
-bridge. Configure its command with `ISABELLE_HOOKS_SEMANTIC_FINGERPRINT_COMMAND` or
-`--semantic-fingerprint-command`. The command receives JSON on standard input:
+Register the hook in `.claude/settings.json`:
 
 ```json
 {
-  "version": 1,
-  "path": "Example.thy",
-  "before": {"source": "...", "units": ["..."]},
-  "after": {"source": "...", "units": ["..."]}
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|Bash",
+        "hooks": [
+          {"type": "command", "command": "python3 .claude/hooks/isabelle_guards.py"}
+        ]
+      }
+    ]
+  }
 }
 ```
 
-It returns parallel proposition/context fingerprint lists:
+Finally, build the registry of methods that sledgehammer and try0 can return for
+your Isabelle installation (this launches Isabelle over HOL; the hook itself never
+does, so this runs once, outside the write path):
 
-```json
-{"before": ["fingerprint"], "after": ["fingerprint"]}
+```bash
+python3 .claude/hooks/refresh_searchable_methods.py
 ```
 
-Null entries fall back to structural matching. Provider failure also falls back safely;
-it never authorizes a refactor on its own.
+The registry is keyed to the launcher: if you configure the hook with
+`--isabelle-command` or `ISABELLE_HOOKS_ISABELLE`, pass that same command as this
+script's argument. Rerun it after upgrading Isabelle. If the registry is missing
+or stale, the hook doesn't stall your writes; it falls back to a stricter mode
+that demands search evidence for every new proof method except ones you pass
+with `--allow`. How the cache invalidates itself — including upgrades hidden
+behind a stable wrapper script — is covered in
+[docs/internals.md](docs/internals.md).
 
-## Searchable-method registry
+Codex and OpenCode installs use the same bundle; see
+[Other agents](#other-agents-codex-opencode) below.
 
-The write hook never launches Isabelle. Prepare or refresh its registry during setup or
-after changing Isabelle:
+## What gets blocked
 
-```sh
-python3 refresh_searchable_methods.py [isabelle-command]
+Two independent policies, both on by default; `--policies` restricts enforcement
+to one of them (e.g. `--policies apply-script`). Both see the same parsed edit —
+the flag changes only which rules are evaluated.
+
+**`apply-script`** blocks any edit that introduces an `apply` step, and tells the
+agent to write structured Isar (`proof ... qed`, `by`, `using ... by`) instead.
+
+**`guessed-proof`** blocks an edit that introduces a *search-discoverable* closer —
+a terminal proof method that sledgehammer or try0 could have produced, like
+`metis`, `smt`, or `meson`. Such a method is only accepted with one of two kinds of evidence that
+it wasn't guessed:
+
+1. **A real search result.** A recent sledgehammer/try0 call in the session
+   transcript whose output names that method. Each result authorizes exactly one
+   written proof, and completing any other state-changing operation first
+   invalidates it — so the agent can't run one search and coast on it.
+2. **A relocation.** The same lemma together with its proof, moved within a single
+   atomic edit. Old and new proofs are matched one-for-one by file, surrounding
+   context, statement, and method, so reordering lemmas is fine. Blocked as
+   non-relocations:
+   - copying a proof without removing the original;
+   - moving just the method onto a different statement;
+   - splitting the deletion and the insertion across separate tool calls.
+
+   When static matching can't decide, the edit needs search evidence like any
+   other.
+
+Renames and other formatting-level refactors can additionally be cleared by an
+external PIDE-based fingerprint provider; see
+[docs/internals.md](docs/internals.md).
+
+## Prover MCP servers (I/Q and PIDE)
+
+The hook doesn't care how the agent talks to Isabelle — any transcript in which a
+sledgehammer/try0 result appears works as evidence. But it has first-class
+support for two MCP servers that give the agent an interactive PIDE session, and
+they are how I actually run it.
+
+**[AutoCorrode](https://github.com/awslabs/AutoCorrode)'s I/Q server** (I use the
+development port in my
+[AutoCorrode-Dev fork](https://github.com/balazstothofficial/AutoCorrode-Dev))
+exposes an interactive Isar REPL plus file tools. The guard understands both
+sides of it:
+
+- Its file tools are guarded edits: `write_file` (including its `str_replace`
+  form), `save_file`, and `open_file` when called with content to create a file —
+  read-only `open_file` uses pass untouched.
+- Its searches count as evidence: a `repl_sledgehammer` call, or a `repl_step` whose
+  Isar command is `sledgehammer`/`try0`, counts as a search, and the method named
+  in that call's own result authorizes writing it.
+- Its REPL state changes (`repl_undo`, `repl_reset`, `repl_load`, and any
+  `repl_step` that isn't itself a search) invalidate outstanding evidence, just
+  like a file edit.
+
+**[isabelle-pide-mcp](https://github.com/kappelmann/isabelle-pide-mcp)** is also
+supported, though I've tested it less. It has no search tool at all — searching
+means editing the theory — so the guard tracks that flow directly: an `edit` whose
+*added* text contains `sledgehammer` or `try0` is allowed and arms an in-theory
+search, and a later `get_state` result naming a method is that search's evidence
+for writing the method. Repeated polls of the same find reuse the same evidence
+rather than minting more. The `edit` tool is guarded when its `origin` is a
+`*.thy` path.
+
+To use either server, extend the hook matcher with its tool names, e.g. for
+Claude Code:
+
+```text
+Write|Edit|MultiEdit|Bash|.*write_file|.*save_file|.*open_file|mcp__isabelle[-_]pide[-_]mcp__edit
 ```
 
-The prepared manifest is keyed from the configured command, launcher identity, query
-version, and query source. `ISABELLE_HOOKS_IDENTITY` can supply a deployment-owned
-identity when a stable wrapper path does not reflect Isabelle upgrades. A missing or
-stale manifest uses the conservative fallback immediately rather than making a write
-wait for `isabelle process_theories`.
+A server can additionally bind its search results to specific goals with
+`ISABELLE_HOOK_EVIDENCE` markers, and a PIDE session is the natural backend for
+the semantic fingerprint provider; both protocols are specified in
+[docs/internals.md](docs/internals.md).
 
-## Hook contract
+## Tuning
 
-The entry point reads one JSON object from standard input:
+`isabelle_guards.py` flags, appended to the hook command in your agent config —
+e.g. `"command": "python3 .claude/hooks/isabelle_guards.py --isabelle-command
+/opt/Isabelle2025-2/bin/isabelle"` (for OpenCode, use the hook entry's `args`
+array in `guards.json`). Environment-variable equivalents in parentheses:
 
-```json
-{
-  "tool_name": "Write",
-  "tool_input": {"file_path": "Example.thy", "content": "lemma x: True by simp"},
-  "transcript_path": "/path/to/session.jsonl"
-}
-```
-
-- Exit `0`: allow the call.
-- Exit `2`: block it and explain why on standard error.
-- Malformed input, missing dependencies, and internal errors fail open.
-
-Install these together:
-
-- `isabelle_guards.py`
-- `refresh_searchable_methods.py`
-- `Hook_Searchable_Methods.thy`
-- the complete `isabelle_hooks/` package
-- `skills/isabelle-proof-hooks/SKILL.md` in the agent's project skill directory
-
-`isabelle_guards.py` accepts:
-
-- `--policies apply-script guessed-proof` (both by default; select either one alone)
-- `--window N`
-- `--allow M1 M2 ...` for the conservative no-registry fallback
-- `--found-via T1 T2 ...`
-- `--remediation TEXT`
-- `--isabelle-command CMD`
-- `--searchable M1 M2 ...` for diagnostics/tests
+- `--policies apply-script guessed-proof` — which rules to enforce.
+- `--window N` — how far back in the transcript to look for search evidence
+  (default 30 entries).
+- `--allow M1 M2 ...` — methods exempt from evidence in the no-registry fallback.
+- `--found-via T1 T2 ...` — which tool results count as searches (default
+  `sledgehammer try0`).
+- `--remediation TEXT` — replace the "Fix: ..." line in block messages.
+- `--isabelle-command CMD` (`ISABELLE_HOOKS_ISABELLE`) — the Isabelle launcher the
+  registry is keyed to.
 - `--semantic-fingerprint-command CMD`
+  (`ISABELLE_HOOKS_SEMANTIC_FINGERPRINT_COMMAND`) — external refactor verifier.
+- `--searchable M1 M2 ...` — override the registry, for diagnostics and tests.
 
-## Installation
+## Limitations
 
-For Claude Code, install the bundle under `.claude/hooks/` and configure one
-PreToolUse command hook:
+Beyond the ground rules in [What this is not](#what-this-is-not):
+
+- **It is trivially defeated by an agent that wants to defeat it.** An agent could
+  fabricate an evidence marker or route the edit through an unrecognized tool. The
+  bundled skill instructs agents not to, and in practice they comply — but this is
+  cooperation, not enforcement.
+- **It fails open.** Malformed input, unrecognized tool calls, missing
+  dependencies, and internal errors all allow the write rather than blocking the
+  agent. A provider or registry failure likewise falls back to the conservative
+  path and never authorizes anything on its own.
+- **It can false-positive.** Evidence matching is heuristic; a legitimate
+  refactor the matcher can't follow will be asked for search evidence it shouldn't
+  strictly need.
+
+## Other agents (Codex, OpenCode)
+
+**Codex:** install the same bundle under `.codex/hooks/` and add a `PreToolUse`
+command hook to `.codex/hooks.json` (or inline in the adjacent `config.toml`),
+with the matcher taken from [`guards.json`](guards.json)'s `defaultMatcher`:
 
 ```json
-{"type":"command","command":"python3 .claude/hooks/isabelle_guards.py"}
+{"type": "command", "command": "python3 .codex/hooks/isabelle_guards.py"}
 ```
 
-Install only one policy by adding, for example,
-`--policies guessed-proof` or `--policies apply-script`. Policy selection changes
-evaluation only; edit extraction remains the same shared, single-pass implementation.
-Install the bundled skill as `.claude/skills/isabelle-proof-hooks/SKILL.md`.
+If Codex may start below the project root, resolve the root before invoking the
+script; project hooks must be approved in Codex settings. Install the skill
+directory as `.agents/skills/isabelle-proof-hooks/` — its `agents/openai.yaml`
+carries the Codex-facing interface metadata.
 
-For Codex, install it under `.codex/hooks/` and configure the same single command in
-`.codex/hooks.json` or the adjacent `config.toml`. If Codex may start below the project
-root, resolve the root before invoking the script. Project hooks must be approved in
-Codex settings. Install the skill as `.agents/skills/isabelle-proof-hooks/SKILL.md`.
-
-For OpenCode, install the Python bundle and `guards.json` under `.opencode/hooks/`, and
-copy `opencode-guard.ts` to `.opencode/plugins/`. The plugin maintains a per-worktree
-transcript and invokes the configured guard once per matching call. Install the skill as
+**OpenCode:** install the Python bundle and [`guards.json`](guards.json) under
+`.opencode/hooks/`, and copy `opencode-guard.ts` to `.opencode/plugins/`. The
+plugin maintains a per-worktree transcript and invokes the guard once per matching
+call; an optional `"interpreter"` key in `guards.json` overrides the `python3` it
+runs the guard with. Install the skill as
 `.opencode/skills/isabelle-proof-hooks/SKILL.md`.
 
-[`guards.json`](guards.json) is the OpenCode configuration and a matcher reference for
-other agents. Its matcher covers recognized write, edit, shell, MCP, patch, and optional
-`functions.exec` calls. Only configure tools whose mutation payload is understood.
+### Matcher contract
 
-## Code layout
+`guards.json` also serves as a matcher reference for wiring up other agents: the
+guard understands plain writes and edits, `apply_patch`, shell heredocs, literal
+nested calls inside Codex `functions.exec`,
+[AutoCorrode](https://github.com/awslabs/AutoCorrode) I/Q file writes, and
+[isabelle-pide-mcp](https://github.com/kappelmann/isabelle-pide-mcp) edits (see
+[Prover MCP servers](#prover-mcp-servers-iq-and-pide)). Only route tools whose
+mutation payload it understands; anything else fails open.
 
-`isabelle_hooks/guard.py` owns policy evaluation and configuration. `edits.py` produces
-the shared old/new mutation view, `relocations.py` owns proof-unit provenance and the
-semantic-provider protocol, `transcript.py` owns search evidence, and `discovery.py`
-owns explicit registry refresh plus hot-path manifest loading. Contract and adapter
-tests live in `test/`.
+
+## Internals
+
+Implementer-facing details — the hook's stdin/exit-code contract, the
+`ISABELLE_HOOK_EVIDENCE` marker protocol for search integrations, the semantic
+fingerprint provider protocol, and how the method registry is cached and
+invalidated — live in [docs/internals.md](docs/internals.md). The code entry point
+for policy evaluation is
+[`isabelle_hooks/guard.py`](isabelle_hooks/guard.py).

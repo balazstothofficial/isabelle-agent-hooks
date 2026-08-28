@@ -765,7 +765,7 @@ class NoGuessedProofs(unittest.TestCase):
             payload["transcript_path"] = path
             code, err = run_hook(payload, ["--searchable", "auto"])
             self.assertEqual(code, 2)
-            self.assertIn("without matching proof provenance", err)
+            self.assertIn("without a matching proof-search result", err)
         finally:
             os.remove(path)
 

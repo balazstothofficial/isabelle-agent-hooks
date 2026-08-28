@@ -190,7 +190,7 @@ def _guessed_violation(fragments, transcript, cfg):
     mismatch_note = (mismatch + "\n") if mismatch else ""
     return Violation(
         "\n[isabelle-theory-guard] BLOCKED write to an Isabelle theory.\n"
-        "It introduces method `%s` without matching proof provenance.\n\n"
+        "It introduces method `%s` without a matching proof-search result.\n\n"
         "Location: %s\nSource: %s\n\n%s%s"
         "New closers must be found by %s. Exact proof-unit relocations within one "
         "atomic edit are allowed automatically.\n%s\n"

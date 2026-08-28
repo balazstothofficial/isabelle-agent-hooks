@@ -1,6 +1,6 @@
 """Proof-unit matching for verified refactoring moves.
 
-The no-guessed-proof rule concerns provenance, not byte offsets.  A proof unit that
+The no-guessed-proof rule concerns where a proof came from, not byte offsets.  A proof unit that
 already existed may therefore move within one atomic edit without fresh search
 evidence.  Matching is deliberately stricter than method-name matching: the enclosing
 statement, closer, lexical context, and file must agree, and each old occurrence is
